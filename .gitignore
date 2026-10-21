@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / debug
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Runtime data (SQLite + file tree)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Build outputs
+client/dist/
+server/dist/
+
+# OS / editor
+.DS_Store
+*.swp
+.project
+.pydevproject
+.coverage
+.cache
+.vscode
+
+# Logs
+*.log
+.ipynb_checkpoints/
+
+# Scratch planning artifacts; not shipped
+tasks/
