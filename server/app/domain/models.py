@@ -81,6 +81,7 @@ class Feedback:
 class RunState:
     id: UUID
     owner_id: UUID
+    conversation_id: UUID
     project_id: UUID | None
     message: str
     status: RunStatus
@@ -101,6 +102,13 @@ class ProjectContext:
     id: UUID
     title: str
     summary: str
+
+
+@dataclass(slots=True)
+class ChatSelection:
+    run_id: UUID
+    project_id: UUID
+    context_version: int
 
 
 def validate_relative_path(path: str) -> str:

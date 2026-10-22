@@ -11,12 +11,14 @@ from sqlalchemy.orm import selectinload
 
 from app.domain.enums import (
     ACTIVE_STATUSES,
+    ChatRequestStatus,
     ConversationSender,
     EventKind,
     FileType,
     RunStatus,
 )
-from app.domain.models import Feedback, Plan, ProjectContext, RunState
+from app.domain.errors import InvalidTransitionError, RunConflictError
+from app.domain.models import ChatSelection, Feedback, Plan, ProjectContext, RunState
 from app.domain.serialization import plan_payload
 from app.infrastructure.persistence.models import (
     Artifact,
@@ -40,6 +42,7 @@ def _run_state(run: Run) -> RunState:
     return RunState(
         id=run.id,
         owner_id=run.owner_id,
+        conversation_id=run.conversation_id,
         project_id=run.project_id,
         message=run.message,
         status=run.status,
@@ -86,6 +89,159 @@ class SqlAlchemyRepository:
             )
         ).scalar_one_or_none()
 
+    async def get_pending_chat_request(self, owner_id: uuid.UUID) -> ConversationTurn | None:
+        conversation = await self.get_conversation(owner_id)
+        if conversation is None:
+            return None
+        return (
+            await self.session.execute(
+                select(ConversationTurn)
+                .where(
+                    ConversationTurn.conversation_id == conversation.id,
+                    ConversationTurn.request_status == ChatRequestStatus.NEEDS_SELECTION,
+                )
+                .order_by(ConversationTurn.sequence)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    async def create_chat_request(self, owner_id: uuid.UUID, content: str) -> ConversationTurn:
+        conversation = await self.get_or_create_conversation(owner_id)
+        conversation = (
+            await self.session.execute(
+                select(Conversation).where(Conversation.id == conversation.id).with_for_update()
+            )
+        ).scalar_one()
+        pending = (
+            await self.session.execute(
+                select(ConversationTurn.id)
+                .where(
+                    ConversationTurn.conversation_id == conversation.id,
+                    ConversationTurn.request_status.in_(
+                        [
+                            ChatRequestStatus.RECEIVED,
+                            ChatRequestStatus.CLASSIFYING,
+                            ChatRequestStatus.NEEDS_SELECTION,
+                        ]
+                    ),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if pending is not None:
+            raise RunConflictError("A chat request is already awaiting selection")
+
+        snapshot = {
+            "selected_project_id": (
+                str(conversation.selected_project_id) if conversation.selected_project_id else None
+            ),
+            "active_feature_run_id": (
+                str(conversation.active_feature_run_id)
+                if conversation.active_feature_run_id
+                else None
+            ),
+            "context_version": conversation.context_version,
+        }
+        return await self.add_conversation_turn(
+            owner_id,
+            content,
+            ConversationSender.USER,
+            project_id=conversation.selected_project_id,
+            request_status=(
+                ChatRequestStatus.NEEDS_SELECTION
+                if conversation.selected_project_id is None
+                else None
+            ),
+            context_snapshot=snapshot,
+        )
+
+    async def _lock_owned_turn(
+        self, owner_id: uuid.UUID, turn_id: uuid.UUID
+    ) -> tuple[Conversation, ConversationTurn] | None:
+        conversation = (
+            await self.session.execute(
+                select(Conversation).where(Conversation.owner_id == owner_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            return None
+        turn = (
+            await self.session.execute(
+                select(ConversationTurn)
+                .where(
+                    ConversationTurn.id == turn_id,
+                    ConversationTurn.conversation_id == conversation.id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if turn is None:
+            return None
+        return conversation, turn
+
+    async def confirm_new_project_request(
+        self,
+        owner_id: uuid.UUID,
+        turn_id: uuid.UUID,
+        context_version: int,
+        title: str,
+    ) -> ChatSelection | None:
+        locked = await self._lock_owned_turn(owner_id, turn_id)
+        if locked is None:
+            return None
+        conversation, turn = locked
+
+        if turn.request_status == ChatRequestStatus.ENQUEUED:
+            existing_run = await self.session.get(Run, turn.run_id) if turn.run_id else None
+            if (
+                existing_run is not None
+                and existing_run.owner_id == owner_id
+                and existing_run.conversation_id == conversation.id
+                and existing_run.project_id == turn.project_id
+                and turn.project_id is not None
+            ):
+                return ChatSelection(existing_run.id, turn.project_id, conversation.context_version)
+            raise InvalidTransitionError("The confirmed chat request no longer has its run")
+        if turn.request_status != ChatRequestStatus.NEEDS_SELECTION:
+            raise InvalidTransitionError("The chat request is not awaiting selection")
+
+        if context_version != conversation.context_version:
+            raise InvalidTransitionError("The chat context changed; refresh the project menu")
+
+        project = Project(owner_id=owner_id, title=title, summary="")
+        self.session.add(project)
+        await self.session.flush()
+        run = Run(
+            owner_id=owner_id,
+            conversation_id=conversation.id,
+            project_id=project.id,
+            message=turn.content,
+        )
+        self.session.add(run)
+        await self.session.flush()
+
+        turn.project_id = project.id
+        turn.run_id = run.id
+        turn.request_status = ChatRequestStatus.ENQUEUED
+        conversation.selected_project_id = project.id
+        conversation.active_feature_run_id = run.id
+        conversation.context_version += 1
+        await self.session.commit()
+        return ChatSelection(run.id, project.id, conversation.context_version)
+
+    async def cancel_chat_request(self, owner_id: uuid.UUID, turn_id: uuid.UUID) -> bool:
+        locked = await self._lock_owned_turn(owner_id, turn_id)
+        if locked is None:
+            return False
+        _, turn = locked
+        if turn.request_status == ChatRequestStatus.CANCELLED:
+            return True
+        if turn.request_status != ChatRequestStatus.NEEDS_SELECTION:
+            raise InvalidTransitionError("The chat request is not awaiting selection")
+        turn.request_status = ChatRequestStatus.CANCELLED
+        await self.session.commit()
+        return True
+
     async def get_run(self, run_id: uuid.UUID) -> RunState | None:
         run = await self.session.get(Run, run_id)
         return _run_state(run) if run else None
@@ -104,8 +260,10 @@ class SqlAlchemyRepository:
         feedback: dict[str, Any] | None = None,
         checks: dict[str, Any] | None = None,
     ) -> RunState:
+        conversation = await self.get_or_create_conversation(owner_id)
         run = Run(
             owner_id=owner_id,
+            conversation_id=conversation.id,
             message=message,
             project_id=project_id,
             plan=plan,
@@ -413,6 +571,9 @@ class SqlAlchemyRepository:
         role: ConversationSender,
         run_id: uuid.UUID | None = None,
         project_id: uuid.UUID | None = None,
+        *,
+        request_status: ChatRequestStatus | None = None,
+        context_snapshot: dict[str, Any] | None = None,
     ) -> ConversationTurn:
         conversation = await self.get_or_create_conversation(owner_id)
         conversation = (
@@ -439,6 +600,8 @@ class SqlAlchemyRepository:
             role=role,
             content=content,
             sequence=sequence,
+            request_status=request_status,
+            context_snapshot=context_snapshot,
         )
         self.session.add(turn)
         await self.session.flush()

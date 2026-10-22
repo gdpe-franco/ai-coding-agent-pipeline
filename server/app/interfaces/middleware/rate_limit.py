@@ -18,45 +18,68 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not self.container.settings.rate_limit_enabled:
             return await call_next(request)
-        bucket = self._bucket(request)
-        if bucket is None:
+        buckets = self._buckets(request)
+        if not buckets:
             return await call_next(request)
-        key = self._key(request, bucket)
-        try:
-            result = await self.container.rate_limiter.consume(bucket, key)
-        except RateLimitUnavailable:
-            return JSONResponse(
-                status_code=503,
-                media_type="application/problem+json",
-                content={
-                    "type": "about:blank",
-                    "title": "Rate limiter unavailable",
-                    "status": 503,
-                    "detail": "Rate limiting is temporarily unavailable.",
-                },
-            )
-        if not result.allowed:
-            return JSONResponse(
-                status_code=429,
-                media_type="application/problem+json",
-                headers={
-                    "Retry-After": str(result.retry_after),
-                    "RateLimit-Limit": str(result.limit),
-                    "RateLimit-Remaining": "0",
-                    "RateLimit-Reset": str(result.retry_after),
-                },
-                content={
-                    "type": "about:blank",
-                    "title": "Too many requests",
-                    "status": 429,
-                    "detail": "Rate limit exceeded.",
-                },
-            )
+        result = None
+        for bucket in buckets:
+            try:
+                result = await self.container.rate_limiter.consume(
+                    bucket, self._key(request, bucket)
+                )
+            except RateLimitUnavailable:
+                return self._problem(
+                    503,
+                    "Rate limiter unavailable",
+                    "Rate limiting is temporarily unavailable.",
+                )
+            if not result.allowed:
+                return self._problem(
+                    429,
+                    "Too many requests",
+                    "Rate limit exceeded.",
+                    {
+                        "Retry-After": str(result.retry_after),
+                        "RateLimit-Limit": str(result.limit),
+                        "RateLimit-Remaining": "0",
+                        "RateLimit-Reset": str(result.retry_after),
+                    },
+                )
         response = await call_next(request)
+        assert result is not None
         response.headers["RateLimit-Limit"] = str(result.limit)
         response.headers["RateLimit-Remaining"] = str(result.remaining)
         response.headers["RateLimit-Reset"] = str(result.retry_after)
         return response
+
+    @staticmethod
+    def _problem(
+        status_code: int, title: str, detail: str, headers: dict[str, str] | None = None
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            media_type="application/problem+json",
+            headers=headers,
+            content={
+                "type": "about:blank",
+                "title": title,
+                "status": status_code,
+                "detail": detail,
+            },
+        )
+
+    def _buckets(self, request: Request) -> tuple[str, ...]:
+        bucket = self._bucket(request)
+        if bucket is None:
+            return ()
+        path = request.url.path
+        if (
+            request.method == "POST"
+            and path.startswith("/api/v1/chat/messages/")
+            and path.endswith("/selection")
+        ):
+            return bucket, "run_create"
+        return (bucket,)
 
     def _bucket(self, request: Request) -> str | None:
         path = request.url.path

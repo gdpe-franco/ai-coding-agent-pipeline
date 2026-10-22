@@ -3,9 +3,8 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** MVP in progress. Private accounts and persistent chat are implemented. Chat-driven project
-> selection and coding are follow-on stories. Azure provider verification is blocked because deployment names
-> and credentials are not available.
+> **Status:** MVP in progress. Private accounts, persistent chat, and confirmed new-project creation from chat
+> are implemented. Existing-project/feature selection and provider verification remain follow-on work.
 
 ## How it works
 

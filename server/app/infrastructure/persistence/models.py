@@ -7,6 +7,7 @@ from enum import StrEnum
 from fastapi_users.db import SQLAlchemyBaseUserTableUUID
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -25,6 +26,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
+    ChatRequestStatus,
     ConversationSender,
     EventKind,
     FileType,
@@ -109,6 +111,14 @@ class Run(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "conversations.id", ondelete="CASCADE", name="fk_runs_conversation_id_conversations"
+        ),
+        nullable=False,
+        index=True,
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
@@ -229,7 +239,22 @@ class Conversation(Base):
 
 class ConversationTurn(Base):
     __tablename__ = "conversation_turns"
-    __table_args__ = (UniqueConstraint("conversation_id", "sequence", name="uq_turn_sequence"),)
+    __table_args__ = (
+        CheckConstraint(
+            "request_status IS NULL OR role = 'user'", name="ck_chat_request_is_user_turn"
+        ),
+        UniqueConstraint("conversation_id", "sequence", name="uq_turn_sequence"),
+        Index(
+            "uq_pending_chat_request_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("request_status IN ('received','classifying','needs_selection')"),
+        ),
+        Index("ix_chat_request_claim", "request_status", "heartbeat_at"),
+        Index(
+            "ix_turns_conversation_project_sequence", "conversation_id", "project_id", "sequence"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -249,6 +274,13 @@ class ConversationTurn(Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_status: Mapped[ChatRequestStatus | None] = mapped_column(
+        _pg_enum(ChatRequestStatus, "chat_request_status")
+    )
+    context_snapshot: Mapped[dict | None] = mapped_column(JSONB)
+    intent_result: Mapped[dict | None] = mapped_column(JSONB)
+    locked_by: Mapped[str | None] = mapped_column(String(128))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

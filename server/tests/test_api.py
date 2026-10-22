@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from app.application.ports import RateLimitResult
 from app.main import create_app
 from app.settings import Settings
 from tests.conftest import auth_headers, register_and_login
@@ -41,6 +43,21 @@ def test_missing_token_is_unauthorized(client: TestClient) -> None:
     assert client.get("/api/v1/chat").status_code == 401
 
 
+def _confirm_new_project(
+    client: TestClient, headers: dict[str, str], turn_id: str, version: int, title: str
+):
+    return client.post(
+        f"/api/v1/chat/messages/{turn_id}/selection",
+        headers=headers,
+        json={
+            "context_version": version,
+            "choice": "new_project",
+            "feature_mode": "new",
+            "title": title,
+        },
+    )
+
+
 def test_chat_is_persistent_and_owner_scoped(client: TestClient) -> None:
     alice = register_and_login(client, "alice@example.com")
     bob = register_and_login(client, "bob@example.com")
@@ -59,14 +76,26 @@ def test_chat_is_persistent_and_owner_scoped(client: TestClient) -> None:
     )
     assert submitted.status_code == 202
     turn_id = submitted.json()["turn_id"]
+    assert (
+        client.post(
+            "/api/v1/chat/messages",
+            headers=auth_headers(alice),
+            json={"message": "another request"},
+        ).status_code
+        == 409
+    )
     with psycopg.connect(Settings().psycopg_url) as connection:
         assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
 
     alice_history = client.get("/api/v1/chat", headers=auth_headers(alice)).json()["turns"]
     bob_history = client.get("/api/v1/chat", headers=auth_headers(bob)).json()["turns"]
+    alice_state = client.get("/api/v1/chat", headers=auth_headers(alice)).json()
     assert [turn["content"] for turn in alice_history] == ["private message"]
     assert alice_history[0]["id"] == turn_id
     assert alice_history[0]["run_id"] is None
+    assert alice_history[0]["request_status"] == "needs_selection"
+    assert alice_state["pending_selection"]["turn_id"] == turn_id
+    assert alice_state["pending_selection"]["projects"] == []
     assert bob_history == []
     assert client.get("/api/v1/chat?after=1", headers=auth_headers(alice)).json()["turns"] == []
 
@@ -87,6 +116,152 @@ def test_chat_rejects_blank_message(client: TestClient, message: str) -> None:
         json={"message": message},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="whitespace"),
+        pytest.param("x" * 201, id="over-limit"),
+    ],
+)
+def test_new_project_requires_valid_title(client: TestClient, title: str) -> None:
+    token = register_and_login(client, "alice@example.com")
+    headers = auth_headers(token)
+    turn = client.post("/api/v1/chat/messages", headers=headers, json={"message": "build it"})
+    turn_id = turn.json()["turn_id"]
+    pending = client.get("/api/v1/chat", headers=headers).json()["pending_selection"]
+
+    invalid = _confirm_new_project(client, headers, turn_id, pending["context_version"], title)
+
+    assert invalid.status_code == 422
+    assert client.get("/api/v1/chat", headers=headers).json()["turns"][0]["request_status"] == (
+        "needs_selection"
+    )
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_confirming_new_project_links_original_request_once(client: TestClient) -> None:
+    token = register_and_login(client, "alice@example.com")
+    headers = auth_headers(token)
+    existing = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Old project", "summary": ""}
+    ).json()
+    posted = client.post(
+        "/api/v1/chat/messages", headers=headers, json={"message": "build a new app"}
+    )
+    turn_id = posted.json()["turn_id"]
+    pending = client.get("/api/v1/chat", headers=headers).json()["pending_selection"]
+    assert [project["id"] for project in pending["projects"]] == [existing["id"]]
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+    confirmed = _confirm_new_project(
+        client, headers, turn_id, pending["context_version"], "New app"
+    )
+    assert confirmed.status_code == 202
+    result = confirmed.json()
+    chat = client.get("/api/v1/chat", headers=headers).json()
+    turn = next(turn for turn in chat["turns"] if turn["id"] == turn_id)
+    run = client.get(f"/api/v1/runs/{result['run_id']}", headers=headers).json()
+    assert chat["pending_selection"] is None
+    assert chat["selected_project_id"] == result["project_id"]
+    assert chat["context_version"] == result["context_version"] == 1
+    assert turn["content"] == run["message"] == "build a new app"
+    assert turn["project_id"] == run["project_id"] == result["project_id"]
+    assert turn["run_id"] == result["run_id"]
+    assert turn["request_status"] == "enqueued"
+    assert run["status"] == "pending"
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        run_conversation_id = connection.execute(
+            "SELECT conversation_id FROM runs WHERE id=%s", (result["run_id"],)
+        ).fetchone()[0]
+    assert str(run_conversation_id) == chat["conversation_id"]
+
+    retried = _confirm_new_project(client, headers, turn_id, pending["context_version"], "New app")
+    assert retried.status_code == 202
+    assert retried.json() == result
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+def test_cancel_selection_preserves_turn_and_context(client: TestClient) -> None:
+    token = register_and_login(client, "alice@example.com")
+    headers = auth_headers(token)
+    posted = client.post("/api/v1/chat/messages", headers=headers, json={"message": "build it"})
+    turn_id = posted.json()["turn_id"]
+
+    cancelled = client.post(f"/api/v1/chat/messages/{turn_id}/cancel", headers=headers)
+
+    assert cancelled.status_code == 204
+    chat = client.get("/api/v1/chat", headers=headers).json()
+    assert chat["pending_selection"] is None
+    assert chat["selected_project_id"] is None
+    assert chat["context_version"] == 0
+    assert len(chat["turns"]) == 1
+    assert chat["turns"][0]["content"] == "build it"
+    assert chat["turns"][0]["request_status"] == "cancelled"
+    assert (
+        client.post(f"/api/v1/chat/messages/{turn_id}/cancel", headers=headers).status_code == 204
+    )
+    assert _confirm_new_project(client, headers, turn_id, 0, "No project").status_code == 409
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_selection_is_owner_scoped_and_rejects_stale_context(client: TestClient) -> None:
+    alice = register_and_login(client, "alice@example.com")
+    bob = register_and_login(client, "bob@example.com")
+    alice_headers = auth_headers(alice)
+    bob_headers = auth_headers(bob)
+    turn = client.post(
+        "/api/v1/chat/messages", headers=alice_headers, json={"message": "build it"}
+    ).json()
+    turn_id = turn["turn_id"]
+    pending = client.get("/api/v1/chat", headers=alice_headers).json()["pending_selection"]
+
+    assert (
+        _confirm_new_project(
+            client, bob_headers, turn_id, pending["context_version"], "Stolen project"
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(f"/api/v1/chat/messages/{turn_id}/cancel", headers=bob_headers).status_code
+        == 404
+    )
+
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute(
+            "UPDATE conversations SET context_version=1 WHERE owner_id=(SELECT id FROM users WHERE email=%s)",
+            ("alice@example.com",),
+        )
+        connection.commit()
+    stale = _confirm_new_project(client, alice_headers, turn_id, 0, "Stale project")
+
+    assert stale.status_code == 409
+    alice_state = client.get("/api/v1/chat", headers=alice_headers).json()
+    assert alice_state["pending_selection"]["turn_id"] == turn_id
+    assert alice_state["pending_selection"]["context_version"] == 1
+    assert alice_state["turns"][0]["request_status"] == "needs_selection"
+    assert client.get("/api/v1/chat", headers=bob_headers).json()["turns"] == []
+    refreshed = _confirm_new_project(
+        client,
+        alice_headers,
+        turn_id,
+        alice_state["pending_selection"]["context_version"],
+        "Fresh project",
+    )
+    assert refreshed.status_code == 202
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 
 def test_chat_poll_does_not_create_existing_conversation(
@@ -399,6 +574,35 @@ def test_rate_limiter_returns_429(tmp_path) -> None:
         )
         assert limited.status_code == 429
         assert "Retry-After" in limited.headers
+
+
+def test_selection_confirmation_uses_write_and_run_create_buckets(tmp_path) -> None:
+    settings = Settings(
+        secret_key="test-secret-key-that-is-long-enough-32",
+        rate_limit_enabled=True,
+        data_dir=tmp_path / "data",
+        static_dir=tmp_path / "static",
+    )
+    app = create_app(settings)
+    buckets = []
+
+    async def allow(bucket: str, key: str) -> RateLimitResult:
+        buckets.append(bucket)
+        return RateLimitResult(True, 10, 9, datetime.now(UTC), 60)
+
+    app.state.container.rate_limiter.consume = allow
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat/messages/00000000-0000-0000-0000-000000000001/selection",
+            json={
+                "context_version": 0,
+                "choice": "new_project",
+                "feature_mode": "new",
+                "title": "Project",
+            },
+        )
+    assert response.status_code == 401
+    assert buckets == ["write", "run_create"]
 
 
 def test_rate_limiter_fails_closed(tmp_path) -> None:

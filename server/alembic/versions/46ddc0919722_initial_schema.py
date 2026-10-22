@@ -72,6 +72,7 @@ def upgrade() -> None:
         "runs",
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("owner_id", sa.UUID(), nullable=False),
+        sa.Column("conversation_id", sa.UUID(), nullable=False),
         sa.Column("project_id", sa.UUID(), nullable=True),
         sa.Column("message", sa.Text(), nullable=False),
         sa.Column(
@@ -154,6 +155,15 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("owner_id", name="uq_conversations_owner_id"),
     )
+    op.create_foreign_key(
+        "fk_runs_conversation_id_conversations",
+        "runs",
+        "conversations",
+        ["conversation_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_index(op.f("ix_runs_conversation_id"), "runs", ["conversation_id"], unique=False)
     op.create_table(
         "artifacts",
         sa.Column("id", sa.UUID(), nullable=False),
@@ -189,6 +199,23 @@ def upgrade() -> None:
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column(
+            "request_status",
+            sa.Enum(
+                "received",
+                "classifying",
+                "needs_selection",
+                "enqueued",
+                "cancelled",
+                "failed",
+                name="chat_request_status",
+            ),
+            nullable=True,
+        ),
+        sa.Column("context_snapshot", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("intent_result", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("locked_by", sa.String(length=128), nullable=True),
+        sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -197,6 +224,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["conversation_id"], ["conversations.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="SET NULL"),
+        sa.CheckConstraint(
+            "request_status IS NULL OR role = 'user'", name="ck_chat_request_is_user_turn"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("conversation_id", "sequence", name="uq_turn_sequence"),
     )
@@ -210,6 +240,25 @@ def upgrade() -> None:
         op.f("ix_conversation_turns_project_id"),
         "conversation_turns",
         ["project_id"],
+        unique=False,
+    )
+    op.create_index(
+        "uq_pending_chat_request_per_conversation",
+        "conversation_turns",
+        ["conversation_id"],
+        unique=True,
+        postgresql_where=sa.text("request_status IN ('received','classifying','needs_selection')"),
+    )
+    op.create_index(
+        "ix_chat_request_claim",
+        "conversation_turns",
+        ["request_status", "heartbeat_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_turns_conversation_project_sequence",
+        "conversation_turns",
+        ["conversation_id", "project_id", "sequence"],
         unique=False,
     )
     op.create_table(
@@ -331,9 +380,14 @@ def downgrade() -> None:
     op.drop_table("events")
     op.drop_index(op.f("ix_conversation_turns_conversation_id"), table_name="conversation_turns")
     op.drop_index(op.f("ix_conversation_turns_project_id"), table_name="conversation_turns")
+    op.drop_index("uq_pending_chat_request_per_conversation", table_name="conversation_turns")
+    op.drop_index("ix_chat_request_claim", table_name="conversation_turns")
+    op.drop_index("ix_turns_conversation_project_sequence", table_name="conversation_turns")
     op.drop_table("conversation_turns")
     op.drop_index(op.f("ix_artifacts_run_id"), table_name="artifacts")
     op.drop_table("artifacts")
+    op.drop_index(op.f("ix_runs_conversation_id"), table_name="runs")
+    op.drop_constraint("fk_runs_conversation_id_conversations", "runs", type_="foreignkey")
     op.drop_table("conversations")
     op.drop_index(
         "uq_runs_active_project",
@@ -360,6 +414,7 @@ def downgrade() -> None:
         "run_status",
         "reviewer_verdict",
         "conversation_sender",
+        "chat_request_status",
         "event_kind",
         "file_type",
     ):

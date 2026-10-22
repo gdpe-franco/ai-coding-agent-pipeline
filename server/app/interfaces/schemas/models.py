@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints
+
+from app.domain.enums import ChatRequestStatus
 
 
 class ProjectCreate(BaseModel):
@@ -79,7 +81,19 @@ class ConversationTurnRead(BaseModel):
     sequence: int
     project_id: UUID | None = None
     run_id: UUID | None = None
+    request_status: ChatRequestStatus | None = None
     created_at: datetime
+
+
+class ProjectOptionRead(BaseModel):
+    id: UUID
+    title: str
+
+
+class PendingSelectionRead(BaseModel):
+    turn_id: UUID
+    context_version: int
+    projects: list[ProjectOptionRead]
 
 
 class ChatRead(BaseModel):
@@ -87,7 +101,7 @@ class ChatRead(BaseModel):
     context_version: int
     selected_project_id: UUID | None = None
     active_feature_run_id: UUID | None = None
-    pending_selection: dict[str, Any] | None = None
+    pending_selection: PendingSelectionRead | None = None
     turns: list[ConversationTurnRead]
 
 
@@ -97,6 +111,19 @@ class ChatMessageCreate(BaseModel):
 
 class ChatMessageCreated(BaseModel):
     turn_id: UUID
+
+
+class ChatSelectionCreate(BaseModel):
+    context_version: int = Field(ge=0)
+    choice: Literal["new_project"]
+    feature_mode: Literal["new"]
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class ChatSelectionCreated(BaseModel):
+    run_id: UUID
+    project_id: UUID
+    context_version: int
 
 
 class PreviewUrlRead(BaseModel):

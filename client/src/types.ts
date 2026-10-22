@@ -1,4 +1,11 @@
 export type RunStatus = "pending" | "running" | "awaiting_user" | "completed" | "failed";
+export type ChatRequestStatus =
+  | "received"
+  | "classifying"
+  | "needs_selection"
+  | "enqueued"
+  | "cancelled"
+  | "failed";
 
 export interface Project {
   id: string;
@@ -75,7 +82,19 @@ export interface ConversationTurn {
   sequence: number;
   project_id: string | null;
   run_id: string | null;
+  request_status: ChatRequestStatus | null;
   created_at: string;
+}
+
+export interface ProjectOption {
+  id: string;
+  title: string;
+}
+
+export interface PendingSelection {
+  turn_id: string;
+  context_version: number;
+  projects: ProjectOption[];
 }
 
 export interface Chat {
@@ -83,7 +102,7 @@ export interface Chat {
   context_version: number;
   selected_project_id: string | null;
   active_feature_run_id: string | null;
-  pending_selection: Record<string, unknown> | null;
+  pending_selection: PendingSelection | null;
   turns: ConversationTurn[];
 }
 

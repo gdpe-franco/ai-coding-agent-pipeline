@@ -32,6 +32,15 @@ class ConversationSender(StrEnum):
     SYSTEM = "system"
 
 
+class ChatRequestStatus(StrEnum):
+    RECEIVED = "received"
+    CLASSIFYING = "classifying"
+    NEEDS_SELECTION = "needs_selection"
+    ENQUEUED = "enqueued"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
 class EventKind(StrEnum):
     PROJECT_RESOLVED = "project_resolved"
     PLANNER = "planner"
