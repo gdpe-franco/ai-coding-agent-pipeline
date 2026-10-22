@@ -1,27 +1,21 @@
 # Technical Design Document — AI Multi-Agent Coding Platform (MVP)
 
-**Status:** planning phase. This is the project's Technical Design Document (TDD): the single source of truth
-for the stack, contracts, rules, and the reasoning behind them. It is written to be defended and presented, not
-just implemented. The PRD (in the ignored `tasks/` directory) owns user stories and acceptance criteria only.
+This Technical Design Document (TDD) defines the target architecture, contracts, and technical rationale.
+The PRD in `tasks/prd-mvp.md` owns product scope, user stories, acceptance criteria, and success targets.
 
 ## 0. Executive summary
 
-We are building a small, honest AI coding loop. A user describes an app or feature in plain language; a
-Planner decides which files are needed, a Coder generates complete files, and a Reviewer checks the result with
-deterministic checks first, then an LLM review. The platform either publishes a static preview or hands the work back with the unresolved issues. It never reports an unresolved result as approved.
+A user describes a static app or feature through one persistent, private chat spanning their projects.
+Initial requests and detected or uncertain project/feature changes open a selection menu. Only the user can
+select an owned project or authorize **New project**; ordinary follow-ups retain the confirmed context.
 
-The human is only involved at the boundaries: approve, hand off, or resume with more detail. Inside a round the
-agents work unattended through at most three Coder attempts. If the Reviewer still rejects after the third
-attempt, the run stops in `awaiting_user`; adding guidance starts a new round that reruns the **whole**
-planner → coder → reviewer flow with attempts restored.
+After context is confirmed, an unattended Planner → Coder → Reviewer round generates complete files and
+checks them. Approval publishes a static preview. Three rejected Coder attempts or a valid escalation produce
+an `awaiting_user` handoff; guidance reruns the whole round with a fresh attempt budget. Errors fail explicitly.
 
-When a request does not name a project, a Project Resolver agent uses the user's short- and long-term memory to
-choose the best existing project or create a new one. Provider configuration is developer-only: final users
-never see or change keys, deployments, or model settings.
-
-Deliberate scope: a Vue 3 frontend, a Python/FastAPI/LangGraph backend, a durable PostgreSQL-backed worker,
-owner-scoped multi-user data, and a localhost Docker deployment exposed through Cloudflare Tunnel. We do not
-execute generated code, do not add a broker, and do not add enterprise identity in the MVP.
+The system uses a Vue SPA, FastAPI, a separate LangGraph Worker, PostgreSQL, and persistent file storage.
+Docker runs locally, with Cloudflare Tunnel exposing separate app and preview origins. Provider configuration
+is developer-only, and the server never executes generated code.
 
 ## 1. Problem and goals
 
@@ -36,10 +30,11 @@ demo that shows an honest handoff.
 
 - Accept a plain-language request and produce a visible plan, complete files, a review outcome, and an explicit
   completed or handoff state.
-- Preserve conversation and project context across follow-up runs.
+- Make one user-wide chat the default interaction for creating projects, adding features, and revisiting old work.
+- Preserve chat history and explicitly selected project/feature context across follow-up runs and sessions.
 - Never report an unresolved result as approved.
-- Keep the human out of the inner loop; only expose a completed result or a handoff after the Coder budget is
-  spent or the Reviewer escalates.
+- Keep coding rounds unattended; expose progress without requiring mid-round input, and surface an honest
+  final result, failure, or handoff.
 - Let the user inspect files, preview the result, guide a handoff, and close an abandoned run.
 - Support multi-user login with owner-scoped projects, runs, files, and traces.
 - Keep model credentials out of the domain, out of the repository, and out of the user interface.
@@ -54,28 +49,16 @@ demo that shows an honest handoff.
 - Billing, hard spend caps, or token-budget enforcement.
 - RBAC beyond project ownership.
 - A broad browser test matrix.
-
-### 1.4 Success measures
-
-| Outcome | Measure |
-|---|---|
-| First-pass completion | At least 70% of canonical coupon evaluations approve on the first pass, measured by the evaluation harness. |
-| Preview render | 100% of accepted pages and their relative local assets load in the embedded frame. |
-| Honest failure | 100% of malformed agent responses yield an explicit failure or handoff outcome, never a false approval. |
-| Ownership | A second user cannot read another user's project, runs, files, or trace. |
-| Durability | An interrupted run resumes after a worker restart without duplicate approval or lost accepted files. |
-| Project resolution | When no project is selected, the resolver chooses an owned project or creates a new one; it never crosses users. |
-| Abuse protection | Over-limit requests return `429` with `Retry-After`; untrusted forwarded headers cannot bypass the limiter. |
+- Automatic project selection or creation by an agent, and multiple independent chats per user.
 
 ## 2. Constraints and assumptions
 
-- **$0 hosting for the assessment.** The stack runs in Docker on localhost and is exposed through Cloudflare
-  Tunnel. Free managed hosts were assessed and rejected: ephemeral disks, no Node subprocess, or a paid plan.
+- **$0 hosting for the assessment.** Docker on localhost supplies a durable filesystem and Node subprocesses;
+  Cloudflare Tunnel supplies public HTTPS access.
 - **PostgreSQL 17 is the only datastore.** No Redis, no broker, no object store in the MVP. This keeps one
   backup story and one failure mode.
-- **Azure OpenAI is provisioned but unnamed.** The company provides one credential and one endpoint; the
-  per-role deployment names have not been supplied, so the Azure adapter remains unverified and tests use fake
-  ports.
+- **Azure OpenAI is the initial provider.** Live verification depends on credentials and deployment names
+  supplied by the developer (§13.2); deterministic tests use fake model ports.
 - **Node is required at runtime** for `node --check`; the runtime image must include it.
 - **The preview cannot be trusted with secrets.** Generated projects are static, unauthenticated, and
   capability-addressed.
@@ -88,9 +71,9 @@ demo that shows an honest handoff.
 
 | Component | Responsibility |
 |---|---|
-| Frontend | Vue 3, TypeScript, Pinia, Tailwind, Vite. Chat, project picker, plan, file viewer, review panel, and sandboxed preview. Polls run state over a typed REST client. |
-| Backend | FastAPI under `/api/v1`; auth, projects, runs, files, preview URL, health. Validates with Pydantic v2 and enqueues work; never executes the graph. |
-| Worker | Claims pending runs, resolves the project if needed, executes the LangGraph workflow, writes files and events, updates memory, finalizes the run. |
+| Frontend | Vue 3, TypeScript, Pinia, Tailwind, Vite. One persistent user chat as the landing screen; inline context-selection menu, run progress, plan, files, review, and sandboxed preview. Polls chat and run state over a typed REST client. |
+| Backend | FastAPI under `/api/v1`; auth, chat, manual context confirmation, projects, runs, files, preview URL, health. Persists messages, validates ownership and selections, and enqueues work; never calls models or executes the graph in-request. |
+| Worker | Classifies chat intent before run creation; continues confirmed context or requests a selection menu. Claims pending runs, executes planner → coder → reviewer, writes files and events, updates memory, and finalizes the run. |
 | Database | PostgreSQL 17: application tables, durable run queue, rate-limit counters, LangGraph checkpoints, and the long-term memory store. |
 | File storage | Persistent volume for latest project files, approved artifacts, preview snapshots, and archives. |
 | Preview | A separate static origin serving copied files at an unguessable capability URL. Never executes generated code. |
@@ -113,7 +96,7 @@ cloud "Cloudflare Tunnel" as tunnel
 User --> tunnel
 tunnel --> frontend
 tunnel --> preview
-frontend --> backend : REST /api/v1
+frontend --> backend : chat + explicit context selection\nREST /api/v1
 backend --> db : app data + queue
 backend --> storage : read
 worker --> db : claim + checkpoints
@@ -135,18 +118,32 @@ participant "Frontend" as fe
 participant "Backend\n/api/v1" as api
 database "Database\nruns + queue" as db
 participant "Worker" as worker
-participant "Resolver" as resolver
+participant "Intent detector\npre-run only" as detector
 participant "LangGraph\nplanner → coder → reviewer" as graph
 
-User -> fe : request
-fe -> api : POST /runs {message, project_id?}
-api -> db : insert pending run (owner-scoped)
-api --> fe : 202 + run_id
-worker -> db : claim (FOR UPDATE SKIP LOCKED)
-opt no project selected
-  worker -> resolver : choose existing project or create
-  resolver -> db : project_id + summary
+User -> fe : message in the same user chat
+fe -> api : POST /chat/messages {message}
+api -> db : persist user turn + context snapshot
+api --> fe : 202 + turn_id
+worker -> db : claim received chat message
+alt no confirmed context
+  worker -> db : needs_selection (no model call)
+else confirmed context exists
+  worker -> detector : message + recent chat + current context
+  detector --> worker : continue_current / request_selection
+  worker -> db : persist routing result
 end
+alt initial context or detected/uncertain switch
+  fe -> api : GET /chat
+  api --> fe : pending message + selection menu
+  User -> fe : choose owned project / New project\nand continue / new feature
+  fe -> api : POST /chat/messages/{turn_id}/selection
+  api -> db : validate choice; create project only if requested;\nupdate context + enqueue run atomically
+  api --> fe : 202 + run_id + confirmed context
+else ordinary follow-up
+  worker -> db : enqueue run in confirmed context
+end
+worker -> db : claim run (FOR UPDATE SKIP LOCKED)
 worker -> graph : new round, resume or start
 graph -> graph : checks, then LLM review; up to 3 Coder attempts
 alt approved and both checks pass
@@ -154,25 +151,82 @@ alt approved and both checks pass
   worker -> db : publish artifacts, events, chat reply
   worker -> db : status completed
 else third rejection or escalate
-  graph -> db : status awaiting_user\nfiles, issues, counts
+  worker -> db : status awaiting_user\nfiles, issues, counts
+  User -> fe : guidance in the same chat, targeted to the run
   fe -> api : POST /runs/{id}/resume {guidance}
   api -> db : status pending; round + 1; attempts reset
 end
 loop active run
+  fe -> api : GET /chat (ordered turns + context)
   fe -> api : GET /runs/{id}/events?after=...
   api --> fe : ordered events
 end
 @enduml
 ```
 
-- `POST /api/v1/runs` returns `202` with the run id. The project may be supplied explicitly or resolved in the
-  worker; the run is owner-scoped either way.
+- `POST /api/v1/chat/messages` persists a message and returns `202` with its turn id. Intent detection happens
+  asynchronously before a run exists. Chat polling exposes `needs_selection` or the associated run id.
 - The Backend never executes the graph. The Worker owns the run lock, heartbeat, round, and terminal
   transitions.
 - The human is not involved during a round. After three rejected Coder attempts the run stops in
   `awaiting_user`; guidance starts a new round at the Planner, not at the Coder.
 - A model-driven run can take minutes; the PostgreSQL-backed queue keeps HTTP requests short and lets the Worker
   restart independently without adding a broker.
+
+### 3.3 Single-chat interaction and context menu
+
+After login, the user returns to the same chat, including messages about previous projects, selection prompts,
+results, and handoffs. Project lists, file inspection, run details, and preview are supporting panels linked
+from the chat. A project-creation form or separate run page is not the main workflow.
+
+The menu offers the user's existing projects and **New project**. It also distinguishes continuing the current
+feature from starting a new feature in the chosen project. For a false-positive switch, **Continue current
+context** keeps the original selection; **Cancel** preserves the message without executing it. A manual
+change-context action opens the same menu. No menu is required for an ordinary continuation.
+
+A feature is a coding request/run with follow-up work in the selected project, not a separate `features` table
+in the MVP. Each new coding request creates a run; guidance on a handoff explicitly targets and resumes that
+same run. `active_feature_run_id` identifies the originating run for the current feature: continuations keep
+that reference, while a new-feature selection starts a new reference at its first run. The request's context
+snapshot records this association. Switching context never retargets an already queued, running, or
+awaiting-user run. Returning to a project restores its most recent feature context from its associated turns.
+
+The original message is retained while the menu is open and submitted once after confirmation. The context
+badge identifies the current project and feature; messages and result cards retain their own project/run
+associations when the user switches away.
+
+```puml
+@startuml
+!pragma layout smetana
+title Chat context selection — before a coding run
+skinparam backgroundColor white
+skinparam shadowing false
+start
+:persist message in the user's single chat;
+if (confirmed context and no manual change request?) then (yes)
+  :detect continuation or context change;
+  if (clear continuation?) then (yes)
+    :retain confirmed context;
+  else (switch / new feature / uncertain / detector error)
+    :show context menu;
+  endif
+else (no)
+  :show context menu;
+endif
+if (menu shown?) then (yes)
+  if (user cancels?) then (yes)
+    :keep transcript and previous context;
+    stop
+  else (confirms)
+    :validate owned project or New project choice;
+    :confirm continue or new feature;
+  endif
+endif
+:atomically link message, persist context, enqueue one run;
+:planner -> coder -> reviewer unattended;
+stop
+@enduml
+```
 
 ## 4. Application architecture
 
@@ -185,7 +239,7 @@ domain types. Composition happens only at the entry points and in the hand-writt
 | Layer | Owns | Must not own |
 |---|---|---|
 | `domain` | Plain dataclasses, errors, and pure policies: retry budget, plan-set guard, approval rules, state transitions. | FastAPI, SQLAlchemy, provider SDKs, filesystem or network I/O. |
-| `application` | Use cases, LangGraph wiring, the project resolver, and narrow `typing.Protocol` ports. | Infrastructure adapters, routers, SDK types. |
+| `application` | Chat/context use cases, pre-run intent detection, LangGraph wiring, and narrow `typing.Protocol` ports. | Infrastructure adapters, routers, SDK types. |
 | `infrastructure` | PostgreSQL repositories, queue, workspace, LLM providers, memory store, rate limiter, clock. | Business policy. |
 | `interfaces` | FastAPI routers, request/response schemas, auth dependencies, middleware, composition. | Domain rules or direct SDK calls. |
 
@@ -203,7 +257,8 @@ package "interfaces" as I {
 package "application" as A {
   [use cases]
   [LangGraph graph]
-  [project resolver]
+  [chat + context selection]
+  [intent detection]
   [ports (Protocols)]
 }
 package "domain" as D {
@@ -227,13 +282,13 @@ N ..> D
 ```text
 server/app/
 ├── domain/
-│   ├── models.py          # Plan, PlanStep, Code, Feedback, Issue, Attempts
+│   ├── models.py          # chat, context, Plan, Code, Feedback, run state
 │   ├── errors.py          # DomainError and subclasses
 │   └── policies.py        # retry budget, plan-set guard, approval rules
 ├── application/
 │   ├── ports.py           # Protocol ports listed below
 │   ├── graph.py           # LangGraph workflow
-│   ├── resolver.py        # project selection from memory
+│   ├── chat.py            # user chat, context selection, pre-run intent detection
 │   ├── checks.py          # deterministic file/syntax checks
 │   ├── memory.py          # load/save memory use cases
 │   └── use_cases/         # start_run, resume_run, close_run, finalize_run, ...
@@ -260,10 +315,10 @@ server/app/
 |---|---|
 | `LLMClient` | One structured model call for a role. Returns validated output or a typed model error. No SDK types cross the boundary. |
 | `Workspace` | List, read, write project files; run read-only checks; return a preview URL; delete a project workspace. Writes are plan-guarded and atomic. |
-| `RunRepository` | Persist and read run state, attempts, reviews, artifacts, and conversation turns; apply terminal transitions. |
+| `RunRepository` | Persist and read the user chat, context, turns, run state, attempts, reviews, and artifacts; atomically confirm selection/enqueue and apply terminal transitions. |
 | `RunQueue` | Enqueue, claim, heartbeat, release, and reclaim runs. Hides the SQL queue mechanics. |
 | `EventSink` | Append ordered run events. Append-only. |
-| `MemoryStore` | Load relevant long-term memory and save deterministic memory items; expose the user's project index to the resolver. Hides the store backend. |
+| `MemoryStore` | Load relevant project memory and save deterministic memory items; maintain the user's project index. Hides the store backend; memory cannot authorize a context change. |
 | `RateLimiter` | Consume a named fixed-window budget and report the retry delay. PostgreSQL-backed, shared across API workers. |
 | `Clock` | Provide current time for tests and policies. |
 
@@ -271,8 +326,8 @@ server/app/
 
 The infrastructure registry builds one `LLMClient` per role from **developer environment configuration only**.
 One global `(provider, model)` selection applies to all roles, with per-role Azure deployment names; end users
-have no choice. The initial real provider is Azure OpenAI; the same adapter also supports plain OpenAI and any
-OpenAI-compatible endpoint (Groq, Together, Fireworks, DeepSeek, xAI, vLLM, Ollama).
+have no choice. Azure OpenAI is the initial provider, with plain OpenAI as the configured fallback.
+Other OpenAI-compatible providers require adapter verification before use; compatibility is not assumed.
 
 Model resolution:
 
@@ -281,24 +336,16 @@ Model resolution:
    deployment exist; otherwise `openai` with `gpt-4o-mini`.
 
 Per-role deployment names are the only per-role setting. There are no per-role provider/model overrides in the
-MVP, no per-project credentials, no project settings endpoints, and no `/models` endpoint. The Project Resolver
-uses the Planner deployment.
+MVP, no per-project credentials, no project settings endpoints, and no `/models` endpoint. The pre-run intent
+detector uses the Planner deployment; it has no project-selection authority.
 
 Azure notes: use the standard `openai` client against the resource's `/openai/v1/` base URL, preferring the
 Responses API with `text.format` JSON Schema and falling back to `chat.completions` with JSON Schema. For
-Azure, the request `model` field is the **deployment name**, not the underlying model name. Deployment names
-have not been supplied yet, so the adapter is **unverified** and tests use fake ports.
+Azure, the request `model` field is the **deployment name**, not the underlying model name. See §13.2 for
+the live-verification dependency.
 
 Never pass an API key, token, URL, or provider SDK type into domain or application code. Infrastructure resolves
 environment credentials and injects ports. Only infrastructure reads `*_API_KEY` values.
-
-Role substitution guidance for later evaluation:
-
-| Role | Why |
-|---|---|
-| Reviewer | Short context, judgment over written files, one call per attempt: cheapest to substitute with a small local model. |
-| Coder | Multi-file coherence and strict structured output fail first on small models. |
-| Planner / Resolver | Task decomposition and project selection are the hardest steps; a weak choice poisons the run. |
 
 ### 4.4 Adding an adapter
 
@@ -318,9 +365,7 @@ title One round — planner, coder, reviewer
 skinparam backgroundColor white
 skinparam shadowing false
 start
-if (project selected?) then (no)
-  :resolver chooses or creates a project;
-endif
+:confirmed project/feature context supplied by chat;
 :load memory;
 :planner;
 :validate plan;
@@ -357,33 +402,36 @@ repeat while (next coder attempt?) is (yes)
 @enduml
 ```
 
-`START → resolve project if needed → load memory → planner → coder → reviewer`. The Reviewer runs deterministic
+`START → load confirmed project memory → planner → coder → reviewer`. Context selection and intent detection
+finish before a run is enqueued; neither is a graph node. The Reviewer runs deterministic
 checks before the LLM review; approval requires both. The Coder gets at most `MAX_CODER_ATTEMPTS=3` generations
 per round, revised only from Reviewer feedback. The third rejection or a valid `escalate` yields
 `awaiting_user`, never a false approval. Model/schema errors end the run as `failed` with no model-error retry.
 `chat_reply` is written by the application layer, not a graph node.
 
-There is no clarification pause and no mid-round human input. A round is unattended until `completed` or
-`awaiting_user`. `awaiting_user` is a persisted pause, not `END`.
+There is no clarification pause and no mid-round human input. The selection menu is a pre-run chat state, not
+`awaiting_user`. A round is unattended until `completed`, `failed`, or `awaiting_user`. `awaiting_user` persists
+the handoff for an explicit resume; a context switch does not resume it.
 
 ### 5.2 State contract
 
 | Object | Required fields and rules |
 |---|---|
 | `PlanStep` | UUID4 `id`, `name`, relative `file_path`, `file_type`, `description`, optional artifact IDs, timestamp. |
-| `Plan` | `id`, `project_id`, 1–8 steps by default, `summary`, timestamp. |
+| `Plan` | `id`, `project_id`, 1–8 steps, `summary`, timestamp. |
 | `Code` | `id`, `run_id`, `file_path`, complete `content`, lowercase SHA-256 `checksum`, timestamp. |
 | `Feedback` | `verdict`, `summary`, `issues`, optional `suggested_code`, timestamp. |
 | `CheckReport` | `file_structure_ok`, `js_syntax_ok`, `files_checked`, `syntax_checked`, `issues`. |
-| `Attempts` | Model-call records (`planner`/`coder`/`reviewer`, verdict/error, round) and terminal `failed` flag. |
-| `RunState` | `id`, `owner_id`, `project_id` (nullable until resolved), `message`, `status`, plan, latest code, feedback, checks, attempts, `attempts_used`, `attempts_total`, `round`, latest `user_guidance`, events, trace, terminal `chat_reply`, timestamps. `GraphState` adds LangGraph metadata/next-node fields. |
+| `Conversation` | UUID `id`, unique `owner_id`, nullable `selected_project_id`, nullable `active_feature_run_id`, monotonic `context_version`, timestamps. One per user; selected references must belong to that user and the feature run must belong to the selected project. |
+| `ConversationTurn` | UUID `id`, `conversation_id`, ordered `sequence`, sender, content, nullable `project_id`/`run_id`, and timestamps. User requests additionally persist routing status, context snapshot/version, and validated intent result. |
+| `RunState` | `id`, `owner_id`, non-null confirmed `project_id`, `conversation_id`, `message`, `status`, plan, latest code, feedback, checks, `attempts_used`, `attempts_total`, `round`, latest `user_guidance`, events, trace, terminal `chat_reply`, timestamps. `GraphState` adds LangGraph metadata/next-node fields. The project cannot change after enqueue. |
 | `RunEvent` | UUID, event kind, typed payload, timestamp; append-only. |
 
 `RunStatus` is `pending | running | awaiting_user | completed | failed`:
 
 - `pending` queued and claimable.
 - `running` a Worker owns the run and is heartbeating.
-- `awaiting_user` the Coder budget is spent and the run needs guidance.
+- `awaiting_user` the Coder budget is spent or the Reviewer escalated; the run needs guidance.
 - `completed` and `failed` are terminal.
 
 ```puml
@@ -391,7 +439,7 @@ There is no clarification pause and no mid-round human input. A round is unatten
 !pragma layout smetana
 skinparam backgroundColor white
 skinparam shadowing false
-[*] --> pending : POST /runs
+[*] --> pending : confirmed chat request enqueued
 pending --> running : worker claim
 running --> running : retry inside the round
 running --> completed : approve + checks pass
@@ -407,8 +455,8 @@ failed --> [*]
 `attempts_used` counts Coder generations in the current round; `attempts_total` never resets. Each round is a
 new LangGraph thread (`graph_runs.round`), so a resume starts at the Planner, not at the interrupted Coder node.
 On resume: increment `round`, reset `attempts_used=0`, append guidance, set status `pending`, and let the Worker
-claim the run again. `Attempts.failed` is true for model-error termination or explicit abandonment, never for a
-handoff.
+claim the run again. Model-call records belong in the trace; counters and `RunStatus` define the retry and
+terminal-state policy without a separate failure flag.
 
 - `MAX_CODER_ATTEMPTS=3` means at most three Coder generations per round. Increment both counters once per Coder
   invocation before checks. A checksum or static-check failure consumes the attempt.
@@ -424,22 +472,24 @@ handoff.
 
 | Agent | Input | Output and validation |
 |---|---|---|
-| Resolver | `owner_id`, message, recent run summaries, user project index (id, title, summary, last outcome) | `{project_id: UUID or null, title, confidence, reason}`; must choose an owned project or null; null creates a project; Pydantic validation. |
-| Planner | `project_id`, message, conversation history, relevant memory, optional template/max steps | `Plan`; Pydantic schema; UUID4 IDs; relative path with no leading `/`, `..`, or backslash and matching `^[A-Za-z0-9_\-./]+$`; allowlisted file type; 1–8 steps by default. |
-| Coder | `project_id`, latest plan/step, complete `existing_files`, step index, project memory, optional token/temperature settings | `Code`; path must be in the current plan; application recomputes SHA-256; complete files only, written atomically; local asset references must be relative. |
+| Intent detector (pre-run, outside graph) | Message, current confirmed project/feature context, and bounded recent user-chat context | `{action: continue_current or request_selection, reason}`; Pydantic validation. New-project, new-feature, switch, or uncertain intent requests the menu. No returned project id, creation command, or selected target. |
+| Planner | `project_id`, message, project-filtered conversation history, relevant memory | `Plan`; Pydantic schema; UUID4 IDs; relative path with no leading `/`, `..`, or backslash and matching `^[A-Za-z0-9_\-./]+$`; allowlisted file type; 1–8 steps. |
+| Coder | `project_id`, latest plan/step, complete `existing_files`, step index, project memory | `Code`; path must be in the current plan; application recomputes SHA-256; complete files only, written atomically; local asset references must be relative. |
 | Reviewer | project, plan, code list, `CheckReport`, relevant memory | `Feedback` with verdict `approve`, `reject`, or `escalate`; summary, issues, optional suggested code, timestamp; Pydantic validation. |
 
 Use JSON Schema structured output for each role and Pydantic `model_validate` at the boundary; never regex-parse
-free text. A single lossy self-repair inside the adapter may recover malformed output and is logged as a model
-call within the same Coder attempt. On unrecoverable failure, tag `resolver_error`, `planner_error`,
-`coder_error`, or `reviewer_error`, send `graph_error → run_end`, and show a clear final message. An unparsable
+free text. The adapter may make one repair call for malformed output, recorded within the same Coder attempt
+when applicable. Do not treat transport/authentication failures as repairable output. On unrecoverable graph
+failure, tag `planner_error`, `coder_error`, or `reviewer_error`, record an error trace and `error → run_end`
+events, and show a clear final message. An unparsable
 Reviewer response is `reviewer_error`; a valid `escalate` is a handoff. Schema errors never become a valid
-verdict.
+verdict. A detector/schema failure occurs before run creation: mark the chat request `needs_selection` with
+`intent_error`, leave context unchanged, and let the user explicitly choose via the menu. Do not
+silently enqueue against a guessed target.
 
 ### 5.4 Static checks
 
-`run_checks` is read-only, runs inside the Reviewer node before the LLM call, and is an application service today
-so it can become a separate checker node later without changing the domain.
+`run_checks` is a read-only application service invoked inside the Reviewer node before the LLM call.
 
 - Stage 1: every planned file exists below the project root, is nonempty, and has an allowed extension.
 - Stage 2: every generated `*.js` file passes `node --check`; the process has a timeout and cannot execute the
@@ -449,26 +499,50 @@ so it can become a separate checker node later without changing the domain.
 - The Worker image must contain Node. Generated files must use relative local asset paths so the preview
   capability path keeps resolving assets.
 
-### 5.5 Long-term memory and project resolution
+### 5.5 Long-term memory and pre-run intent detection
 
 LangGraph's PostgreSQL-backed `AsyncPostgresStore` is compiled into the graph and initialized with `setup()`,
 like the checkpointer. Two namespaces:
 
-- `("user", owner_id, "projects")` — the project index used by the Resolver. Each entry holds project id,
+- `("user", owner_id, "projects")` — a project index for context summaries. Each entry holds project id,
   title, short summary, last feature, last outcome, and timestamp.
 - `("project", project_id, "memory")` — approved plan summary, user guidance, and project conventions used by
   the Planner, Coder, and Reviewer.
 
 When a project exists, write deterministically at the end of every round (completed, awaiting_user, or failed):
-update the project summary and its index entry. A resolver failure has no project and only marks the run
-`failed`. No extra LLM call extracts memories. Load relevant project memory before planning;
+update the project summary and its index entry. A failed pre-run intent check creates no run and does not
+write project memory. No extra LLM call extracts memories. Load relevant project memory before planning;
 cap retrieval at 10 items and 4000 characters. Memory is user- and project-scoped and deleted with its project.
 
-**Resolver behavior.** The Resolver runs in the Worker before the Planner, only when the run has no
-`project_id`. It receives the message, the user's recent run summaries, and the project index. It returns an
-owned project id or `null` with a new title. `null` creates a new project. A resolver error marks the run
-`failed`; it never silently attaches the work to the wrong project. If the user supplied a project explicitly,
-the resolver is skipped.
+**Intent detection.** The Worker processes a persisted chat request before any coding run exists. If no project
+is selected, it requests the menu without a model call. Otherwise a structured model call classifies whether
+the message continues the current context or needs selection. The input includes the context badge data and
+bounded recent chat turns; it does not authorize selection from project memory. The Backend supplies menu
+choices from owned project rows, never from model-invented ids.
+
+Only an explicit user selection can change project/feature context or create a project. Selecting an existing
+project loads its latest files, plan/code/feedback, and project-scoped memory. Only chat turns associated with
+that project feed the Planner; unrelated projects' chat text is excluded from coding context. Recent global
+chat is used for intent detection, not as a substitute for the target project's memory.
+
+Persist the selected context server-side. Snapshot it and `context_version` when receiving each message; lock
+and revalidate it before enqueue. A stale selection from another tab returns `409` and preserves the pending
+message for a refreshed menu. Selecting a project, linking the request turn, and enqueueing its run are atomic;
+confirming **New project** also creates that project in the same transaction. Retries of the same confirmation
+return the existing run and never create a duplicate project/run.
+
+Context snapshots contain the project id, originating feature-run id, `feature_mode`, and context version.
+Increment the version whenever the selected project/feature changes or is cleared. Continuing a feature does
+not change its origin, and late run results never overwrite the currently selected context. Intent calls are
+recorded against the request turn and consume neither `attempts_used` nor `attempts_total`. Bound the recent
+chat supplied to the detector to 10 turns / 4000 characters, separately from the current message.
+
+Chat request states are `received → classifying → needs_selection | enqueued | failed`, and
+`needs_selection → enqueued | cancelled`; an initial request can go directly to `needs_selection`. These are
+not `RunStatus` values. Claim/recovery metadata makes detector work durable across restarts, with stale claims
+reclaimed after 60 seconds. A cancelled or failed request keeps its transcript entry but creates no run.
+An intent-detector error requests manual selection; `failed` is reserved for a pre-run processing failure that
+cannot produce a usable selection prompt. The user can submit a fresh request after such a failure.
 
 ### 5.6 Checkpoints, traces, and chat
 
@@ -481,15 +555,19 @@ long-term memory. Both use a Psycopg 3 connection and their own lifecycle; do no
 - The Worker initializes both at startup. The Backend does not need them to enqueue or read run state.
 - Each round uses a new checkpoint thread; `graph_runs` records the round. A resume starts a new thread at the
   Planner.
-- Checkpoint after each Resolver/Planner/Coder/Reviewer node and on reject, approve, graph error, and `run_end`.
+- Checkpoint after each Planner/Coder/Reviewer node and on reject, approve, graph error, and `run_end`.
 - Before a handoff, persist `awaiting_user` with the latest code, feedback, both counts, and round.
-- Checkpoints live in PostgreSQL (never under `data/`), retained 30 days for resume/debug.
+- Checkpoints live in PostgreSQL, never under `data/`; retention is defined in §8.4.
 
-Conversations (`conversations`, `conversation_turns`) are user-visible and, when a project exists, the user turn
-is written when the run resolves to that project and the assistant reply on completion or failure. Both are
-written by an application use case, not a graph node. The trace (`graph_runs`, `graph_events`, plus checkpointer state)
+One `conversations` row per user holds the user-wide chat; projects do not own separate conversations.
+`conversation_turns` stores the user message immediately, including before any project is selected. Selection
+prompts/outcomes and completion, failure, or handoff replies are appended to this same transcript by application
+use cases, not graph nodes. Guidance is a new user turn linked to the resumed run. Each relevant turn retains
+its project/run association so results from an earlier context appear under the correct request.
+The trace (`graph_runs`, `graph_events`, plus checkpointer state)
 records node executions, timestamps, and snapshots without chat text; `GET /api/v1/runs/{id}/trace` exposes it.
-`run_end` bridges the two through a `chat_reply` event so traces replay without changing conversation history.
+Finalization appends a `chat_reply` event and the corresponding chat turn once; replaying a trace does not
+append messages to the conversation.
 
 ## 6. API design
 
@@ -502,15 +580,16 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 |---|---|---|---|---|
 | `POST` | `/api/v1/auth/*` | `fastapi-users` register, login, reset, verify | Public | `auth` |
 | `GET` | `/api/v1/users/me` | Current user | Bearer | `read` |
-| `POST` | `/api/v1/projects` | Create a project explicitly | Bearer | `write` |
+| `GET` | `/api/v1/chat` | The user's single chat, ordered turns (`after` cursor), selected context/version, pending selection, linked run ids | Bearer | `read` |
+| `POST` | `/api/v1/chat/messages` | Persist `{message, request_selection?}` and queue pre-run processing; returns `202 {turn_id}` | Bearer | `run_create` |
+| `POST` | `/api/v1/chat/messages/{turn_id}/selection` | Confirm manual project/feature choice for that pending message; returns `202 {run_id, project_id, context_version}` | Bearer + owner | `write` + `run_create` when enqueueing |
+| `POST` | `/api/v1/chat/messages/{turn_id}/cancel` | Cancel a pending selection without running the message or changing context | Bearer + owner | `write` |
 | `GET` | `/api/v1/projects` | List the user's projects | Bearer | `read` |
 | `GET` | `/api/v1/projects/{project_id}` | Project detail and summary | Bearer + owner | `read` |
 | `DELETE` | `/api/v1/projects/{project_id}` | Delete project, workspace, memory, related data | Bearer + owner | `write` |
 | `GET` | `/api/v1/projects/{project_id}/files` | List current files | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/files/{path}` | Read one file; path validated | Bearer + owner | `read` |
-| `GET` | `/api/v1/projects/{project_id}/conversation` | Conversation turns | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/preview-url` | Return the capability URL | Bearer + owner | `read` |
-| `POST` | `/api/v1/runs` | Create and enqueue a run: `{message, project_id?}`; returns `202` | Bearer | `run_create` |
 | `GET` | `/api/v1/runs/{run_id}` | Run state, project, plan, latest code/feedback, checks, counts | Bearer + owner | `read` |
 | `GET` | `/api/v1/runs/{run_id}/events` | Ordered append-only events; supports `after` cursor | Bearer + owner | `read` |
 | `GET` | `/api/v1/runs/{run_id}/trace` | Graph trace | Bearer + owner | `read` |
@@ -523,13 +602,31 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 
 ### 6.2 Errors and status codes
 
-- `POST /runs` is `202`. The body is `{message, project_id?}`. If `project_id` is supplied it must be owned by
-  the caller; otherwise the Resolver chooses or creates one. The response is `{run_id, project_id}`, where
-  `project_id` may be null until the Worker resolves it.
+- `POST /chat/messages` returns `202 {turn_id}` after persisting the user turn and the server-side context
+  snapshot. It does not accept an arbitrary target project. `GET /chat` exposes the request status, any menu
+  prompt, and its run id once enqueued. Recent turns are paginated by an ordered sequence cursor.
+- `POST /chat/messages/{turn_id}/selection` accepts `context_version`, `choice` (`continue_current`,
+  `existing_project`, or `new_project`), and `feature_mode` (`continue` or `new`). `existing_project` requires
+  an owned `project_id`; `new_project` requires a user-confirmed title and `feature_mode=new`. Continuing uses
+  the confirmed project's feature context; choosing another project restores that project's latest feature
+  context unless the user chooses a new feature. The original message is retained and linked to the new run.
+- A manual change-context action opens the same menu for the composed message. Message submission may include
+  `request_selection=true` to bypass detection and request that menu explicitly; the default is false.
+- No public `POST /projects` or `POST /runs` bypass is part of this interaction contract. Project creation and
+  run enqueueing are application use cases invoked through the chat flow; read/detail/delete APIs support it.
 - At most one non-terminal run per project. Return `409` if one exists or if `MAX_RUNS_PER_PROJECT` is reached.
-  At most one unresolved project-less run per user; a second project-less create returns `409`.
+  At most one unconsumed chat request per user (`received`, `classifying`, or `needs_selection`); a second
+  submission returns `409` while the user confirms or cancels the first. An enqueued run does not block chat
+  selection for another project. No project-less run is created.
+- If a continuation cannot enqueue because its project is busy or capped, keep the message in `needs_selection`
+  with a conflict reason and no new run. Selection confirmation returns `409` for the same conflict without
+  consuming the message; the user can choose another project or cancel.
+- A non-owned selection returns `404`. A stale context version or cancelled/invalid request transition returns
+  `409`; the server never falls back to the current project after a rejected choice. Cancel leaves the previous
+  context unchanged. A retry after successful selection returns the already linked run rather than enqueueing again.
 - `resume` accepts `{guidance: "..."}` and is valid only for `awaiting_user`; return `409` on a status mismatch.
-  It resets the Coder budget and reruns the full flow; `attempts_total` is preserved.
+  It resets the Coder budget and reruns the full flow; `attempts_total` is preserved. Guidance is persisted in
+  the same user chat against that run; changing the chat's current context cannot change the resumed project.
 - `close` is valid only for `awaiting_user`; it marks `failed` and preserves history.
 - `DELETE /runs/{id}` is only valid for terminal runs; active runs return `409`.
 - Non-owned resources return `404`, not `403`, to avoid leaking existence.
@@ -544,10 +641,10 @@ Use `fastapi-users` with its SQLAlchemy async adapter and JWT bearer transport f
 reset, and verification (maintenance mode, but the conventional documented FastAPI integration). Local login is
 the only MVP identity path; social login and enterprise delegated credentials are out of scope.
 
-`projects.owner_id` and `runs.owner_id` are mandatory FKs. Route dependencies and repository queries scope every
-project and child row to that user; every child access joins through the owning user or project. A run may exist
-before its project is resolved, so `runs.owner_id` is the ownership anchor until `project_id` is set. Acceptance
-tests must prove user B cannot read user A's project, runs, files, or trace.
+`conversations.owner_id`, `projects.owner_id`, and `runs.owner_id` are mandatory FKs. Route dependencies and
+repository queries scope every chat, turn, selected context, project, and child row to that user. Every run has
+a confirmed project before enqueue. Acceptance tests must prove user B cannot read user A's chat, select one
+of A's projects, confirm A's pending message, or read A's runs, files, or trace.
 
 ### 7.2 Rate limiting
 
@@ -569,9 +666,9 @@ restarts, and needs no Redis.
 | Bucket | Key | Default | Applies to |
 |---|---|---|---|
 | `auth` | IP | 5/min | register, login, password reset, verification |
-| `run_create` | user | 5/min | `POST /runs` |
-| `write` | user | 30/min | resume, close, project mutation |
-| `read` | user | 120/min | project/run/file/event/trace GETs; supports 1s polling |
+| `run_create` | user | 5/min | chat message submission; selection confirmation when it enqueues a run |
+| `write` | user | 30/min | context confirmation/cancellation, resume, close, project mutation |
+| `read` | user | 120/min | chat/project/run/file/event/trace GETs; supports polling within the shared budget |
 | `preview_document` | IP | 60/min | preview document requests |
 | `preview_asset` | IP | 600/min | preview CSS/JS/image requests |
 | `public` | IP | 30/min | unauthenticated non-auth API requests |
@@ -597,9 +694,8 @@ navigation and relative asset loading reliable without cookies or bearer headers
 Preview responses set `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`. The iframe uses
 `sandbox="allow-scripts allow-same-origin allow-forms allow-popups"` with no `allow-top-navigation`; the separate
 origin is essential because scripts and same-origin are both allowed. Preview files must use relative local asset
-paths; a strict CSP may block `data:`/`blob:` URLs. `preview_id` is stable until the project is deleted. Rotation,
-signed previews, and containerized execution of generated apps are deferred. Flappy Bird is one self-contained
-`game.html` with a canvas and no external dependencies.
+paths. `preview_id` is stable until the project is deleted. Rotation, signed previews, and containerized
+execution of generated apps are deferred.
 
 ## 8. Data and storage
 
@@ -617,7 +713,8 @@ Fixed value sets are native PostgreSQL ENUMs mirrored as `str` Python enums for 
 | `run_status` | `pending`, `running`, `awaiting_user`, `completed`, `failed` |
 | `reviewer_verdict` | `approve`, `reject`, `escalate` |
 | `conversation_sender` | `user`, `assistant`, `system` |
-| `event_kind` | `project_resolved`, `planner`, `coder`, `reviewer`, `chat_reply`, `handoff`, `guidance`, `run_start`, `run_end`, `error`, `abandonment` |
+| `chat_request_status` | `received`, `classifying`, `needs_selection`, `enqueued`, `cancelled`, `failed` (user request turns only; distinct from run status) |
+| `event_kind` | `planner`, `coder`, `reviewer`, `chat_reply`, `handoff`, `guidance`, `run_start`, `run_end`, `error`, `abandonment` |
 | `file_type` | `html`, `css`, `js`, `md`, `json`, `svg`, `png`, `ico` |
 
 ```puml
@@ -651,7 +748,8 @@ entity runs {
   * id : UUID
   --
   owner_id : UUID
-  project_id : UUID (nullable)
+  project_id : UUID
+  conversation_id : UUID
   message : TEXT
   status : run_status
   attempts_used : INTEGER
@@ -686,14 +784,25 @@ entity reviews {
 entity conversations {
   * id : UUID
   --
-  project_id : UUID
+  owner_id : UUID (unique)
+  selected_project_id : UUID (nullable)
+  active_feature_run_id : UUID (nullable)
+  context_version : INTEGER
 }
 entity conversation_turns {
   * id : UUID
   --
   conversation_id : UUID
-  run_id : UUID
+  project_id : UUID (nullable)
+  run_id : UUID (nullable)
   role : conversation_sender
+  content : TEXT
+  sequence : INTEGER
+  request_status : chat_request_status (nullable)
+  context_snapshot : JSONB
+  intent_result : JSONB
+  locked_by : TEXT (nullable)
+  heartbeat_at : TIMESTAMPTZ (nullable)
 }
 entity graph_runs {
   * id : UUID
@@ -723,8 +832,12 @@ entity rate_limit_counters {
 
 users ||--o{ projects : owns
 users ||--o{ runs : owns
+users ||--o| conversations : one private chat
 projects ||--o{ runs : groups
-projects ||--o{ conversations : holds
+projects |o--o{ conversations : selected context
+projects |o--o{ conversation_turns : associated with
+conversations ||--o{ runs : originates
+runs |o--o{ conversations : active feature context
 runs ||--o{ artifacts : produces
 runs ||--o{ events : logs
 runs ||--o{ reviews : reviewed_by
@@ -736,19 +849,30 @@ graph_runs ||--o{ graph_events : emits
 ```
 
 `AsyncPostgresSaver` and `AsyncPostgresStore` create their own tables via `setup()`; those are not modelled above.
-Every child access joins through `projects.owner_id` or `runs.owner_id`.
+Every child access joins through `conversations.owner_id`, `projects.owner_id`, or `runs.owner_id`; linked
+chat/project/run owners must match. `conversations.owner_id` is unique, yielding one lazily created chat per
+user. Selected-project and active-feature FKs use `ON DELETE SET NULL`; deleting a project does not delete the
+user's chat. Turn project/run links also use `ON DELETE SET NULL` so the transcript survives resource deletion.
 
 Indexes: `runs(project_id, created_at)`, `runs(owner_id, created_at)`, `runs(status, heartbeat_at)`,
 `events(run_id, created_at)`, `artifacts(run_id)`, `reviews(run_id)`,
 `conversation_turns(conversation_id, sequence)`, `graph_events(graph_run_id, created_at)`,
 `rate_limit_counters(expires_at)`, `worker_heartbeats(last_seen_at)`. `projects.preview_id` is unique. A partial
-unique index on `runs(project_id)` where `project_id IS NOT NULL` and status is non-terminal enforces one active
-run per project; a partial unique index on `runs(owner_id)` where `project_id IS NULL` and status is non-terminal
-enforces one unresolved project-less run per user.
+unique index on `runs(project_id)` where status is non-terminal enforces one active run per project. A partial
+unique index on `conversation_turns(conversation_id)` for request states `received`, `classifying`, and
+`needs_selection` enforces one unconsumed request per chat. Index request status/heartbeat for pre-run claims,
+and `(conversation_id, project_id, sequence)` for project-filtered history. Every coding request turn links to
+at most one run; lock the turn when creating that run so confirmation and claim retries cannot duplicate it.
+
+Schema migrations must preserve existing chat messages and their project/run links when consolidating
+project-scoped conversations into the owner's ordered user-wide chat. Existing runs without a project must
+be explicitly resolved or failed with a recorded reason before enforcing the non-null project constraint;
+a migration must not guess their target or silently discard them.
 
 ### 8.2 Durable queue and worker
 
-The `runs` table is the queue. The Backend inserts `pending`; the Worker claims atomically:
+The `runs` table is the coding queue. The chat use case inserts `pending` after context is confirmed; the
+Worker claims atomically:
 
 ```sql
 UPDATE runs
@@ -772,16 +896,18 @@ RETURNING *;
 - Execution is at-least-once at node boundaries. File writes are atomic, events are append-only, and terminal
   transitions are idempotent: a reclaimed run must not create duplicate approvals or lose accepted files.
 - `awaiting_user` is not claimable; `resume` sets it back to `pending`. At most one non-terminal run per
-  project and one unresolved project-less run per user; `MAX_RUNS_PER_PROJECT` counts all runs and returns `409`
-  at the cap.
-- `WORKER_CONCURRENCY` is fixed at 2 concurrent runs per process. Run one Worker process per container;
+  project; chat requests waiting for manual selection are not runs. `MAX_RUNS_PER_PROJECT` counts all runs and
+  returns `409` at the cap.
+- Worker concurrency is a code constant of 2 runs per process. Run one Worker process per container;
   horizontal workers are safe because of `SKIP LOCKED`.
 - Graceful shutdown stops claiming, finishes or releases the current checkpoint, and clears the lock. A hard crash
   is recovered by stale-heartbeat reclaim.
 - `DELETE /runs/{id}` is terminal-only; there is no mid-run cancellation. The maintenance loop deletes expired
   rate-limit windows and runs the 30-day archive job.
 
-Worker entry point: `python -m app.worker`. The Backend never executes a graph in-request.
+Worker entry point: `python -m app.worker`. The same process also claims pre-run chat requests for intent
+detection (§5.5); it never chooses a project or changes selected context. The Backend never executes a graph
+or model call in-request. A `needs_selection` request remains unclaimable until confirmation or cancellation.
 
 ### 8.3 Workspace and complete files
 
@@ -798,24 +924,29 @@ Writes go to a temporary file in the same directory and use `os.replace` atomica
 complete latest contents; approval copies snapshots to artifacts and preview.
 
 The Coder emits complete files only, never patches or appends. The plan-set guard permits writes only to current
-`plan.steps`; non-plan files remain byte-for-byte unchanged and an attempted write is refused. The editor and
-Coder both read through `read_file`.
+`plan.steps`; non-plan files remain byte-for-byte unchanged and an attempted write is refused. The file viewer
+and Coder read through the Workspace port; the MVP does not include a manual code editor.
 
 ### 8.4 Conversation, deletion, and retention
 
-- `POST /runs` creates a new run for a follow-up request. If it resolves to a project, the run carries that
-  project's latest plan/code/feedback and conversation history into the new round; a project-less run starts
-  fresh.
+- A chat request creates a run only after the current context has been retained or a manual choice confirmed.
+  An existing project supplies its latest plan/code/feedback, files, project-filtered chat history, and memory.
+  A user-confirmed new project starts fresh. New-feature intent in the same project requires the menu too;
+  it starts a new feature context while retaining that project's files and conventions.
 - `POST /runs/{id}/resume` only re-enqueues an `awaiting_user` run and starts a new round.
-- When a project exists, the application layer writes the user turn when the run resolves to the project, and
-  the assistant reply on completion or failure; on handoff, state and events carry the latest files and issues. A
-  resolver failure has no project and only records the terminal run state.
+- The application layer writes the user turn immediately on receipt, links it to the selected project and run
+  at enqueue, and appends replies on completion, failure, or handoff. Selection and intent failures stay in the
+  same chat even when no run/project exists. Run cards show their own project/feature labels independently of
+  the chat's current context. Guidance targets a specific handoff; selecting that project alone does not resume it.
 - `DELETE /runs/{id}` cascades artifacts, events, reviews, and trace rows but leaves the project and latest files.
   `DELETE /projects/{id}` removes the owner's project, workspace, preview snapshot, memory namespace, and related
-  rows.
+  run rows. The user-wide chat remains; deleted project/run links become null and corresponding cards indicate
+  unavailable resources. Deleting the selected project clears its context and the next request needs selection.
+  Deleting an active-feature run clears that feature reference; messages awaiting selection must be revalidated.
 - Active runs, including handoffs, are retained indefinitely. Completed runs older than 30 days archive source
-  files under `data/archived/{project_id}/{run_id}/` and set `runs.archived=true`; events stay with the run and
-  checkpoints are retained 30 days for resume/debug.
+  snapshots under `data/archived/{project_id}/{run_id}/` and set `runs.archived=true`. Archive that run's
+  artifacts, not another run's latest files; keep the current workspace and served preview intact. Events stay
+  with the run; terminal-run checkpoints are retained for 30 days. Do not purge active-run or handoff checkpoints.
 - Rate-limit windows and stale heartbeats are cleaned by the maintenance loop; memory is deleted with its
   project. Archival must move to durable object storage before using an ephemeral production host.
 
@@ -823,14 +954,9 @@ Coder both read through `read_file`.
 
 ### 9.1 Assessment path
 
-Run the Docker stack on localhost and expose it through Cloudflare Tunnel for a stable public HTTPS assessment URL
-at $0. The local machine supplies CPU, disk, and process support without cold starts. FastAPI hosts the built SPA
-and API; the preview is a separate hostname. A separate frontend CDN is deferred.
-
-Hosted alternatives were assessed and rejected for this MVP: Cloudflare Workers (no durable filesystem, no
-`node --check` subprocess, too little CPU), Cloudflare Pages (static only), Cloudflare Containers (paid plan),
-Render + Neon (ephemeral disk), and Railway (low credit plus external storage). Free hosts have ephemeral disks;
-production must replace `WebWorkspace` with an object-storage adapter and keep PostgreSQL external.
+Run Docker locally and expose the app and preview hostnames through Cloudflare Tunnel over HTTPS. The local
+machine supplies persistent disk and Node subprocesses without cold starts. FastAPI hosts the built SPA and API;
+the preview uses a separate hostname. Ephemeral hosting requires durable external storage before deployment.
 
 ### 9.2 Serving and topology
 
@@ -838,9 +964,9 @@ production must replace `WebWorkspace` with an object-storage adapter and keep P
 |---|---|
 | Backend | `uvicorn` in development; `gunicorn` + uvicorn workers in production; factory `app.main:create_app()`. |
 | Worker | Same image, command `python -m app.worker`; no public port. |
-| Frontend/API | Routers under `/api/v1`; `/` and `/assets` serve built Vite files. |
+| Frontend/API | Routers under `/api/v1`; `/` and `/assets` serve built Vite files. After authentication, `/` opens the user's persistent chat; project and run views are supporting detail panels. |
 | Preview | `/preview/{preview_id}/...`; separate hostname; no auth; capability URL. |
-| Health | `GET /health` returns `{status, checks: {db, fs, worker}}`; `503` when a required check fails. |
+| Health | `GET /health` returns `{status, checks: {database, filesystem, worker}}`; `503` when a required check fails. |
 | CORS | Explicit `FRONTEND_ORIGIN`, no wildcard in production. |
 | Trusted proxy | Forwarded client IP headers accepted only from `TRUSTED_PROXY_CIDRS`. |
 
@@ -851,14 +977,14 @@ production must replace `WebWorkspace` with an object-storage adapter and keep P
 | `APP_ENV`, `LOG_LEVEL` | `development`/`production`; `info`/`debug`. |
 | `DATABASE_URL` | SQLAlchemy async URL, e.g. `postgresql+asyncpg://app:change-me@db:5432/app`. The Worker derives a Psycopg URL for the checkpointer and store. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Compose-only database initialization; not read by the app. |
-| `SECRET_KEY` | Required JWT signing secret; never regenerated on startup. |
+| `SECRET_KEY` | Required JWT signing secret; never regenerated on startup. Missing/empty values fail startup with the setting name and no secret value. |
 | `PUBLIC_URL` | Stable external app URL, e.g. `http://localhost:8000`. |
 | `FRONTEND_ORIGIN` | Allowed SPA origin, e.g. `http://localhost:5173` in Vite development. |
 | `PREVIEW_HOST` | Preview origin, e.g. `http://preview.localhost:8000`. |
 | `MAX_RUNS_PER_PROJECT`, `MAX_CODER_ATTEMPTS` | Hard run cap `100`; Coder generations per round `3`. |
 | `MODEL_PROVIDER`, `MODEL_NAME` | Global model selection. Default provider is `azure_openai` when Azure credentials/deployments exist, otherwise `openai`; OpenAI fallback model `gpt-4o-mini`. |
-| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key (unset) and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
-| `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names; currently unset and unverified. The Resolver reuses the Planner deployment. |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
+| `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names. Pre-run intent detection reuses the Planner deployment. |
 | `OPENAI_API_KEY` | Optional fallback when Azure is not configured. |
 | `RATE_LIMIT_ENABLED` | `true`; all bucket limits use code defaults. |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated trusted proxy networks; empty trusts no forwarded headers. Local tunnel example: `127.0.0.1/32,::1/128`. |
@@ -866,7 +992,7 @@ production must replace `WebWorkspace` with an object-storage adapter and keep P
 Other values are code constants: Worker poll 1s, heartbeat 15s, stale reclaim 60s, concurrency 2, Node binary
 `node`, syntax-check timeout 5s, memory caps 10 items / 4000 characters, rate-limit window 60s. Secrets and the
 production `DATABASE_URL` belong in environment settings or a gitignored `.env`. `.env.example` contains
-placeholders only; a repository secret scan rejects populated keys.
+placeholders only; verify that no populated secrets are staged before committing.
 
 ### 9.4 Docker and startup
 
@@ -885,8 +1011,8 @@ docker compose exec app alembic upgrade head
 curl -fsS http://localhost:8000/health
 ```
 
-The Worker waits for PostgreSQL, initializes the checkpointer and store with `setup()` (idempotent), then starts
-claiming runs. The migration command may be part of an entrypoint. Manual development uses PostgreSQL 17 and the
+The Worker waits for PostgreSQL and application migrations, initializes the checkpointer and store with
+`setup()` (idempotent), then starts claiming runs. Manual development uses PostgreSQL 17 and the
 same `DATABASE_URL`, starts FastAPI with `uvicorn app.main:create_app --factory --reload` from `server/`, starts
 the worker with `python -m app.worker`, and runs Vite from `client/`.
 
@@ -899,154 +1025,23 @@ the worker with `python -m app.worker`, and runs Vite from `client/`.
   secrets or decrypted credentials.
 - The Worker heartbeat is the liveness signal for `/health` and the queue.
 
-## 10. Design decisions and trade-offs
+## 10. Design rationale
 
-This section is the defense. Each entry states the decision, the reason, the strongest alternative, why it was
-rejected, and the cost we accept.
-
-### 10.1 Layered ports and adapters with a framework-free domain
-
-**Decision.** `domain` holds dataclasses and pure policies; `application` holds use cases, the graph, resolver,
-and `Protocol` ports; `infrastructure` implements ports; `interfaces` holds FastAPI. Imports flow inward only.
-**Why.** The workflow is the product's core and must be testable without a database, network, or model. A pure
-domain also keeps provider SDKs and credentials away from business logic.
-**Alternative.** Service objects calling SQLAlchemy and SDKs directly, or a DI framework.
-**Rejected because.** Direct imports make policy tests require infrastructure and couple the retry/approval rules
-to vendor types. A framework adds indirection for a small codebase.
-**Accepted cost.** More files and a manual `container.py`.
-
-### 10.2 A separate worker with a PostgreSQL-backed queue
-
-**Decision.** The Backend only inserts `pending` runs; a Worker claims them with `FOR UPDATE SKIP LOCKED` and
-executes the graph. `runs` is the queue.
-**Why.** Model-driven runs take minutes and must not hold HTTP requests. Decoupling makes restarts and progress
-observability trivial.
-**Alternative.** Background tasks in the API process, or Celery/RQ/Redis.
-**Rejected because.** In-process tasks die with the request worker and cannot be observed or reclaimed. A broker
-adds a second datastore and operational surface for a single-node MVP.
-**Accepted cost.** Hand-written claim/heartbeat logic and at-least-once semantics that must stay idempotent.
-
-### 10.3 LangGraph with PostgreSQL checkpoints and store
-
-**Decision.** Model the workflow as a LangGraph graph with `AsyncPostgresSaver` checkpoints and
-`AsyncPostgresStore` memory. Each round is a new thread.
-**Why.** The graph gives explicit nodes, resumable state, and a trace; both persistence pieces already live in
-PostgreSQL, so there is no new infrastructure. A thread per round makes "rerun the whole flow" explicit.
-**Alternative.** A hand-rolled state machine, or an in-memory checkpointer.
-**Rejected because.** A hand-rolled orchestrator is more code to defend and less observable; an in-memory
-checkpointer loses runs on restart, violating the durability goal.
-**Accepted cost.** Package-owned tables, a Psycopg 3 connection alongside `asyncpg`, and `setup()` lifecycle.
-
-### 10.4 One OpenAI-compatible adapter, developer-configured
-
-**Decision.** A provider registry builds one `LLMClient` per role from environment configuration; the adapter
-targets the OpenAI-compatible API, with Azure OpenAI as the first real provider. End users never configure
-providers, credentials, or models.
-**Why.** One adapter reaches Azure, OpenAI, and many hosted/local endpoints, so adding a provider is developer
-configuration. Keeping configuration out of the product removes a credential store, an endpoint surface, and a
-whole class of support issues.
-**Alternative.** A separate SDK adapter per vendor, a self-hosted gateway, or per-project credentials.
-**Rejected because.** Per-vendor adapters multiply code and leak SDK types. A gateway is only justified once
-budget caps or fallback routing are real. Per-project credentials are unnecessary because the platform owner
-pays for and operates the models.
-**Accepted cost.** Users cannot bring their own model; we depend on the provisioned Azure deployments, which are
-currently unnamed and unverified.
-
-### 10.5 A dedicated project resolver
-
-**Decision.** When a run has no `project_id`, a Resolver agent chooses the best owned project or creates a new one
-from the user's project index, recent runs, and message.
-**Why.** Users should be able to keep working on the same feature without remembering project ids, while still
-being able to pick a project explicitly. A dedicated agent keeps this decision out of the Planner and out of the
-Backend.
-**Alternative.** Always require an explicit project, or let the Planner infer it.
-**Rejected because.** Requiring an explicit project every time is poor UX for follow-ups; folding selection into
-the Planner makes planning and routing inseparable and harder to evaluate.
-**Accepted cost.** One extra model call on project-less runs, and a resolver that must be evaluated for
-misclassification.
-
-### 10.6 Complete-file generation
-
-**Decision.** The Coder emits complete files; the plan-set guard rejects writes outside the current plan. Non-plan
-files stay byte-for-byte unchanged.
-**Why.** Complete files are trivially reviewable and immune to patch-context drift. The guard prevents collateral
-edits.
-**Alternative.** Unified diffs or search/replace patches.
-**Rejected because.** Patches fail unpredictably, are harder to validate, and make "what changed" ambiguous in a
-demo.
-**Accepted cost.** Higher token usage per revision.
-
-### 10.7 Deterministic checks inside the Reviewer node
-
-**Decision.** Before the LLM review, run deterministic checks: every planned file exists, is nonempty, has an
-allowed type, then every `*.js` passes `node --check`. Approval requires both stages.
-**Why.** Never ask a model whether a file exists or whether JavaScript parses. A cheap deterministic gate makes
-approval trustworthy.
-**Alternative.** LLM-only review, or a separate checker agent now.
-**Rejected because.** LLM-only review approves broken files. A separate node is unwarranted complexity for two
-checks; the service boundary keeps that extraction open.
-**Accepted cost.** Node must be present at runtime.
-
-### 10.8 Three Coder attempts, then an honest handoff
-
-**Decision.** `MAX_CODER_ATTEMPTS=3` per round. The human is not involved mid-round. The third rejection or a
-valid `escalate` stops the run in `awaiting_user` with files, issues, and counts. Guidance starts a new round that reruns planner →
-coder → reviewer with attempts restored.
-**Why.** Bounds cost and latency, keeps the inner loop unattended, and guarantees the UI never fabricates success.
-Rerunning the whole flow lets new guidance change the plan, not just patch the last attempt.
-**Alternative.** Unlimited retries, auto-accepting the best attempt, or resuming only the Coder.
-**Rejected because.** Unlimited retries burn spend; auto-accepting lies. Resuming only the Coder would ignore
-guidance that invalidates the plan.
-**Accepted cost.** A resumed round redoes planning and generation work.
-
-### 10.9 Capability-URL preview on a separate origin
-
-**Decision.** Serve copied static files at `/preview/{preview_id}/...` on `preview.<host>`, addressed by a random
-`preview_id`; the owner gets the URL from an authenticated endpoint.
-**Why.** Iframe navigation and relative assets work without cookies or bearer headers, and a separate origin
-isolates generated scripts from the app.
-**Alternative.** Owner-authenticated preview, or same-origin preview.
-**Rejected because.** Bearer headers do not survive iframe navigation; same-origin would let generated scripts
-reach the app. The capability is unguessable and rotatable later.
-**Accepted cost.** Anyone with the URL can view the preview; do not put secrets in generated projects.
-
-### 10.10 PostgreSQL-backed rate limiting
-
-**Decision.** A shared fixed-window limiter stores HMAC-hashed counters in PostgreSQL, fails closed with `503`,
-and trusts forwarded IP headers only from `TRUSTED_PROXY_CIDRS`.
-**Why.** Consistent across API workers, survives restarts, and reuses the existing datastore.
-**Alternative.** In-process counters, or Redis.
-**Rejected because.** In-process counters are trivially bypassed by more workers; Redis is a second datastore.
-**Accepted cost.** One database round-trip per limited request.
-
-### 10.11 Multi-user auth with strict ownership
-
-**Decision.** `fastapi-users` with JWT bearer, owner-scoped queries, and `404` for non-owned resources. Local
-login only.
-**Why.** Ownership is a hard requirement and `404` avoids leaking existence. `fastapi-users` is the documented
-FastAPI integration.
-**Alternative.** Custom auth, session cookies, or social/enterprise login now.
-**Rejected because.** Custom auth is avoidable risk; bearer tokens fit the SPA and avoid CSRF surface. Social and
-enterprise identity are not needed for the MVP.
-**Accepted cost.** `fastapi-users` is in maintenance mode; accepted for an MVP.
-
-### 10.12 Filesystem workspace with atomic writes
-
-**Decision.** `WebWorkspace` keeps latest files, approved artifacts, preview copies, and archives on a volume,
-written atomically with `os.replace`.
-**Why.** Simple, inspectable, and adequate for one node. Atomic writes keep readers from seeing partial files.
-**Alternative.** Object storage, or Git-backed workspaces.
-**Rejected because.** Object storage needs credentials and a second failure mode; Git adds a write/commit path we
-do not need yet. Both are clean follow-ups behind the `Workspace` port.
-**Accepted cost.** Tied to a persistent volume; ephemeral hosts would lose data.
-
-### 10.13 Localhost plus Cloudflare Tunnel
-
-**Decision.** Run Docker on localhost and expose it through Cloudflare Tunnel for the assessment.
-**Why.** $0, no cold starts, a real public HTTPS URL, and full CPU for the agent loop and `node --check`.
-**Alternative.** Free managed hosts (Render, Railway, Cloudflare Workers/Pages/Containers).
-**Rejected because.** They either sleep, lose disks, cannot spawn Node, or require a paid plan.
-**Accepted cost.** The demo depends on the local machine being online.
+| Choice | Reason | Trade-off |
+|---|---|---|
+| Inward imports, Protocol ports, manual DI | Test policy without frameworks or I/O; keep provider and storage details behind adapters. | Explicit wiring and adapter boundaries. |
+| PostgreSQL-backed work queues | Durable claims and reclaim without a second datastore or broker. | Application-owned heartbeat logic and idempotent finalization. |
+| LangGraph with PostgreSQL saver/store | Checkpointed node execution and project memory; a new thread per round makes full-flow resume explicit. | Separate Psycopg and asyncpg lifecycles. |
+| One user chat, manual context selection | Keep cross-project work in one interaction without allowing a model to choose the target. Retaining context avoids a picker on every follow-up. | Pre-run intent calls and occasional unnecessary menus. |
+| Developer-configured OpenAI-compatible adapter | Support Azure and OpenAI without user-facing credentials or vendor SDK types in application code. | Live provider compatibility must be verified. |
+| Complete-file generation with a plan-set guard | Reviewable output and deterministic protection of unrelated files. | More tokens than patch-based edits. |
+| Deterministic checks inside Reviewer | Establish file/type/syntax facts before LLM judgment without an extra agent. | Runtime Node is required; syntax checks do not prove app behavior. |
+| Three Coder attempts and a full-flow resume | Bound work and expose unresolved issues without false approval; guidance can change the plan. | Resuming repeats planning and generation. |
+| Separate-origin capability preview | Relative assets and iframe navigation work without JWT headers; generated scripts remain isolated from the app. | Anyone holding the URL can view the preview. |
+| Shared PostgreSQL rate limits | Consistent limits across API workers using the existing datastore. | A database round-trip per limited request; outages fail closed. |
+| JWT auth and owner-scoped access | Standard local identity integration; non-owned resources return `404`. | `fastapi-users` is in maintenance mode; enterprise identity is deferred. |
+| Atomic files on a persistent volume | Simple, inspectable latest files, artifacts, preview copies, and archives. | Tied to durable disk; ephemeral deployment requires another adapter. |
+| Local Docker plus Cloudflare Tunnel | Public HTTPS assessment with persistent disk and Node subprocesses at $0 hosting cost. | Availability depends on the local machine. |
 
 ## 11. Verification and evaluation
 
@@ -1056,65 +1051,63 @@ do not need yet. Both are clean follow-ups behind the `Workspace` port.
   model.
 - Adapter tests cover the provider registry, Azure request shape, workspace writes, queue claim/heartbeat, memory
   store, rate limiter, and preview path handling.
-- API tests cover auth, ownership (`404` for user B), run creation with and without `project_id`, validation,
-  409/429/503 behavior, and problem+json errors.
-- Graph tests use fake model ports and synthetic IDs; no model calls in unit tests. Resolver tests cover explicit
-  project, matched project, new project, and cross-user rejection.
+- API tests cover auth, the unique user chat, persisted pre-project messages, owned menu options, confirmed new
+  project creation, continuing/switching context, cancellation, duplicate confirmation, stale context versions,
+  and `404` for user B. Also test validation, 409/429/503 behavior, and problem+json errors.
+- Graph tests use fake model ports and synthetic IDs; no model calls in unit tests. Pre-run detector tests cover
+  ordinary continuations, new projects/features, switches to old projects, uncertain intent, and invalid output.
+  Prove that detection never selects/creates a project or enqueues a switch before user confirmation.
 - Resume tests prove a new round starts at the Planner, resets `attempts_used`, preserves `attempts_total`, and
   uses a new graph thread.
-- One headless Playwright scenario covers create → resolve → plan → generate → review → preview/handoff. A broad
-  browser matrix is deferred.
+- One headless Playwright scenario uses the same chat for initial prompt → menu → new project → plan → generate
+  → review → preview/handoff → normal follow-up → menu-confirmed switch → return to the older project. Reload
+  preserves chat/context, and replies remain associated with the correct runs. A broad browser matrix is deferred.
 
 ### 11.2 Evaluation harness
 
 A local dataset and runner under `server/evals/` measure whether changes improve the product without LangSmith.
 
-- Scenarios: coupon validation, Flappy Bird, follow-up preserving unrelated files, project resolution, handoff
-  resume, malformed model output, missing credentials, ownership isolation, rate-limit behavior, and worker
-  restart recovery.
+- Scenarios: coupon validation, Flappy Bird, follow-up file preservation, manual context selection,
+  switch-intent detection, handoff/resume, malformed output, missing credentials, ownership isolation,
+  rate limits, worker restart recovery, and retention/cleanup.
 - The runner uses fake ports by default; an optional real-provider smoke run exercises the configured Azure
   deployment.
-- Reports first-pass approval rate, check pass/fail, handoff correctness, resolver accuracy, artifact checksum
-  integrity, file preservation, and ownership results. The PRD's 70% first-pass target is measured with this
-  harness.
+- Reports first-pass approval rate, check pass/fail, handoff correctness, switch-intent detection accuracy,
+  manual-selection enforcement, artifact checksum integrity, file preservation, and ownership results.
+- Measure the PRD's first-pass target using real-provider coupon runs: first-round approval after exactly one
+  Coder generation divided by all executed coupon cases, including failures. Report sample size and provider
+  configuration. Fake-port results verify policy, not model quality; exclude selection and failure-injection
+  fixtures from the model-quality denominator.
 
-### 11.3 Acceptance evidence for the presentation
+### 11.3 Verification evidence
 
-- Canonical coupon request produces `coupon.html`, `coupon.css`, `coupon.js`, and `README.md` with a sample
-  coupon; a nonempty coupon shows “Valid.”
-- Approval happens only after file and script checks pass.
-- A malformed model response produces an explicit `failed` outcome.
-- After three rejections the run hands off as `awaiting_user` with files, issues, and counts; guidance reruns
-  the full flow and resets the round budget.
-- A pending or running run survives a worker restart without duplicate approval or lost files.
-- With no project selected, the resolver chooses an owned project or creates one; user B cannot read user A's
-  project, runs, files, or trace.
-- Over-limit requests return `429` with `Retry-After`; spoofed forwarded headers do not change the client IP.
+Retain test/evaluation reports and the browser scenario result for the PRD acceptance review. Report real-provider
+checks separately from deterministic fixtures, with any blocked dependency stated explicitly. The demonstration
+procedure is in §14; product acceptance criteria remain in the PRD.
 
 ## 12. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
 | Azure deployments unnamed or unavailable during the review. | Adapter isolated behind `LLMClient`; fake ports cover tests and evaluation; a real smoke run happens as soon as names are supplied. |
-| Model output is malformed or non-schema. | JSON Schema plus Pydantic at the boundary; one lossy self-repair inside the adapter; otherwise an explicit `*_error` outcome, never a false approval. |
+| Model output is malformed or non-schema. | JSON Schema plus Pydantic at the boundary; one repair call for malformed output, then coding errors fail the run and intent errors require manual selection. |
 | Generated code is broken despite review. | Deterministic existence/type/syntax checks gate approval; the result is still a static preview. |
-| Resolver attaches a feature to the wrong project. | It only sees owned projects, returns a confidence and reason, is covered by an evaluation scenario, and can be overridden by selecting a project explicitly. |
+| Intent detector misses a switch or requests an unnecessary menu. | Show the confirmed context beside the composer, require a menu for detected/uncertain switches, provide a manual change-context action and Continue current context, and evaluate both missed switches and false positives. The detector cannot select/create a project. |
+| A stale tab or late reply changes the wrong context. | Snapshot/version context on submission, lock and revalidate confirmation/enqueue, preserve one run link per request, and label each reply with its originating project/run. |
 | Worker crash loses a run. | PostgreSQL checkpoints and heartbeat-based reclaim; terminal transitions idempotent. |
 | Cost or latency creep from retries. | Three-attempt round budget, `temperature=0` Reviewer, and the run cap; budget policy is the main open item. |
 | Preview exposes data. | Capability URL on a separate origin, `noindex`/`no-referrer`, sandboxed iframe without top-navigation, and no secrets in generated projects. |
-| Local demo machine offline. | Known limitation of the $0 path; the tunnel and stack restart trivially. |
+| Local demo machine offline. | Document the uptime dependency and verify stack/tunnel restart before assessment. |
 
-## 13. Limits, open items, and roadmap
+## 13. Limits and open items
 
 ### 13.1 Limits
 
-- Static preview only; the server never executes generated code. Writes are serialized per project; one
-  non-terminal run per project; completed runs archive after 30 days; no mid-run cancellation; no budget
-  enforcement; no RBAC beyond owner checks. Multi-user login and ownership are in the MVP.
-- Preview access is capability-based, not authenticated: anyone with the URL can view the generated static files.
-  Do not put secrets in generated projects.
-- Users cannot configure providers, credentials, or models; only the developer can, through environment
-  variables.
+- Execution is serialized per project; each chat permits one unconsumed request. There is no mid-run
+  cancellation or enforced token-spend budget.
+- Intent detection is probabilistic: a missed switch can continue the current context. Keep that context visible
+  and provide the manual change-context action; the detector never selects a different project.
+- Local storage and the tunnel depend on the assessment machine. Preview URLs are bearer capabilities.
 - Deferred: budget metering and spend caps, per-role model evaluation, a separate checker node, object-storage
   adapters, enterprise RBAC/audit, edge/WAF bot protection, signed/rotated preview URLs, containerized execution,
   a separate frontend CDN, social/enterprise login, and a broad browser matrix.
@@ -1124,58 +1117,18 @@ A local dataset and runner under `server/evals/` measure whether changes improve
 | Item | Impact |
 |---|---|
 | Azure deployment names are unset (`AZURE_OPENAI_DEPLOYMENT_PLANNER`, `_CODER`, `_REVIEWER`). | The Azure adapter is unverified until they are supplied with a test key; tests use fake ports meanwhile. |
-| API budget policy is undecided. | The MVP enforces only the static run cap. Recommend recording token usage first, then setting a hard cap from observed costs. |
+| API budget policy is undecided. | The MVP uses the static run cap and request rate limits; spend metering/enforcement needs a separate product decision. |
 
-### 13.3 Build order
-
-1. Scaffold the package layout, settings, SQLAlchemy models, and Alembic migration.
-2. Add auth/ownership and the shared rate limiter.
-3. Add the Postgres run queue, worker loop, and run lifecycle endpoints.
-4. Add the provider registry, agent contracts, graph, checks, and memory.
-5. Add the project resolver, workspace/artifact/preview handling, and the frontend.
-6. Add the evaluation harness, Playwright scenario, and operational checks.
-
-## 14. Presentation and defense appendix
-
-### 14.1 Narrative
-
-1. **Frame the problem honestly.** Generation is easy to demo and easy to fake. The valuable product is a
-   reviewable loop that knows when to stop.
-2. **Show the loop.** Submit the coupon request; show the plan, the generated files, and the checks.
-3. **Show a failure.** Submit a deliberately awkward request, show the Reviewer reject three times, then show the
-   handoff with issues. Add guidance and show the full flow rerun with a fresh budget.
-4. **Show resilience.** Kill the worker mid-run and show the run resume from its checkpoint.
-5. **Show resolution.** Send a follow-up without selecting a project and show the resolver pick the right one.
-6. **Close on seams.** Provider registry, `Workspace` port, and the checker node are the production follow-ups.
-
-### 14.2 Demo script
+## 14. Presentation guide
 
 1. `docker compose up -d`, `alembic upgrade head`, open `http://localhost:8000`.
-2. Log in as user A, create a project, ask for the coupon validation site.
+2. Log in as user A to the persistent chat, ask for the coupon site, choose **New project** from the menu,
+   and confirm its title. Show that no project/run is created before that choice.
 3. Walk the plan, the files, the check report, and the preview at `preview.localhost:8000`.
 4. Ask for a follow-up that must preserve an unrelated file; show only the intended file changing.
 5. Force three rejections (e.g., a request with conflicting constraints) and show the handoff: files, issues,
    counts. Add guidance and show a new round starting at the Planner.
 6. `docker restart <worker>` during a run; show recovery and a single final outcome.
-7. Send a project-less follow-up and show the resolver attach it, or create a new project if unrelated.
-8. Log in as user B and show `404` for user A's project.
-
-### 14.3 Anticipated questions
-
-| Question | Answer |
-|---|---|
-| Why not run generated apps? | Executing untrusted code safely needs sandboxing, resource limits, and a new threat model. The MVP previews static files only; containerized execution is a defined next step. |
-| Why not Redis or Celery? | PostgreSQL already provides the queue, checkpoints, memory, and rate-limit counters. Avoiding a broker removes a datastore, a deployment, and a failure mode. `SKIP LOCKED` is sufficient for our concurrency and scales horizontally. |
-| Why not one strong model for everything? | The port makes providers swappable by the developer, and per-role deployments are allowed. The Reviewer is the safest first substitution; the Planner and Coder keep the stronger model. |
-| How do you know the code works? | We do not claim it does. We prove files exist, are nonempty, are an allowed type, and parse; then a Reviewer judges. Anything unresolved is surfaced, not approved. |
-| Why generate whole files? | Reviewability and determinism. Patches hide what changed and fail unpredictably. |
-| Why three attempts, and what happens after? | Three bounds cost while giving the Coder a fair chance. The third rejection stops the run in `awaiting_user` for human guidance, then reruns the whole flow with a fresh budget. |
-| Why is there no clarification pause? | Mid-loop questions break the "unattended round" contract and make the run harder to reason about. Ambiguity is resolved by the agents or surfaced at the handoff. |
-| How does the system know which project to use? | If the user selects one, we use it. Otherwise a Resolver agent reads the user's project index and recent runs and either picks an owned project or creates a new one. |
-| Why can't users configure models or credentials? | The platform owner operates the provider account. Removing user-facing configuration eliminates a credential store, a settings surface, and support risk; the provider registry still supports multiple vendors for the developer. |
-| What happens if the model returns garbage? | One self-repair inside the adapter, then an explicit `*_error` and `failed`. Schema errors never become approvals. |
-| Is the preview secure? | It is a separate origin with an unguessable capability URL, `noindex`, `no-referrer`, and a sandboxed iframe without top-navigation. We never execute generated code server-side and never place secrets in generated projects. |
-| How do you prevent abuse? | Shared PostgreSQL fixed-window limits per IP and per user, `429` with `Retry-After`, `503` if the limiter is down, and forwarded headers trusted only from configured proxies. |
-| What breaks first at scale? | The single local Docker host and the filesystem workspace. Both are behind ports, so object storage and horizontal workers are additive. |
-| What is the biggest open risk? | The unnamed Azure deployments and the undecided budget policy. Both are tracked in §13.2. |
-| What would you do next? | Add a dedicated tester agent, move to containerized execution and Git-backed workspaces, add usage metering and spend caps, then team RBAC and object storage. |
+7. In the same chat, request Flappy Bird; show the switch menu and choose **New project**. Ask to return to the
+   coupon app; manually select it, then send an ordinary follow-up without another menu. Reload to show persistence.
+8. Log in as user B and show `404` for user A's chat, pending selection, and project.
