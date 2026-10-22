@@ -14,18 +14,18 @@ dependencies = [
     "pydantic==2.14.1",
     "httpx==0.28.1",
     "PyYAML==6.0.3",
-    # These additions are not version-verified yet; pin them after a first install.
-    "uvicorn[standard]",
-    "gunicorn",
-    "sqlalchemy[asyncio]",
-    "asyncpg",
-    "alembic",
-    "langgraph-checkpoint-postgres",
-    "openai",
-    "fastapi-users[sqlalchemy]",
-    "cryptography",
-    "pydantic-settings",
-    "python-multipart",
+    "uvicorn[standard]==0.54.0",
+    "gunicorn==26.2.0",
+    "sqlalchemy[asyncio]==2.0.55",
+    "asyncpg==0.32.0",
+    "alembic==1.20.0",
+    "langgraph-checkpoint-postgres==3.2.0",
+    "psycopg[binary]==3.3.6",
+    "openai==3.36.0",
+    "fastapi-users[sqlalchemy]==15.0.5",
+    "cryptography==50.0.2",
+    "pydantic-settings==2.16.1",
+    "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +37,9 @@ packages = []
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+
+[tool.ruff.lint]
+ignore = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

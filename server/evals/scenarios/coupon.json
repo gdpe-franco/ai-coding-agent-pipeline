@@ -1,0 +1,6 @@
+{
+  "name": "coupon-validator",
+  "request": "Build a static coupon validation page with a code input and a success message.",
+  "expected_files": ["index.html", "app.js"],
+  "expected_outcome": "completed"
+}

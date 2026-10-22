@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+from uuid import UUID
+
+from app.application.graph import CodingGraph
+from app.domain.enums import ConversationSender, EventKind, FileType, RunStatus
+from app.infrastructure.persistence.models import Artifact
+from app.infrastructure.persistence.repository import SqlAlchemyRepository
+
+logger = logging.getLogger(__name__)
+
+
+class RunProcessor:
+    def __init__(
+        self,
+        session_factory,
+        graph: CodingGraph,
+        workspace,
+        memory,
+        settings,
+        worker_id: str,
+    ) -> None:
+        self.session_factory = session_factory
+        self.graph = graph
+        self.workspace = workspace
+        self.memory = memory
+        self.settings = settings
+        self.worker_id = worker_id
+
+    async def process(self, run) -> None:
+        thread_id = f"{run.id}:{run.round}"
+        heartbeat = asyncio.create_task(self._heartbeat_loop(run.id))
+        try:
+            async with self.session_factory() as session:
+                repo = SqlAlchemyRepository(session)
+                graph_run = await repo.get_or_create_graph_run(run.id, run.round, thread_id)
+                await repo.append_event(
+                    run.id,
+                    EventKind.RUN_START,
+                    {"round": run.round, "worker_id": self.worker_id},
+                )
+                await session.commit()
+                graph_run_id = graph_run.id
+
+            state = {
+                "run_id": str(run.id),
+                "owner_id": str(run.owner_id),
+                "project_id": str(run.project_id) if run.project_id else None,
+                "message": run.message,
+                "guidance": run.user_guidance,
+                "plan": run.plan or {},
+                "code": run.latest_code or [],
+                "feedback": run.feedback or {},
+                "checks": run.checks or {},
+                "attempts_used": run.attempts_used,
+                "attempts_total": run.attempts_total,
+                "round": run.round,
+                "graph_run_id": str(graph_run_id),
+                "skip_resolve": run.project_id is not None,
+            }
+            result = await self.graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
+            await self._finalize(run.id, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("run %s failed", run.id)
+            await self._fail(run.id, exc)
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("worker heartbeat shutdown failed", exc_info=True)
+            async with self.session_factory() as session:
+                await SqlAlchemyRepository(session).release(run.id)
+
+    async def _heartbeat_loop(self, run_id: UUID) -> None:
+        while True:
+            await asyncio.sleep(self.settings.worker_heartbeat_seconds)
+            try:
+                async with self.session_factory() as session:
+                    await SqlAlchemyRepository(session).heartbeat(self.worker_id, run_id)
+            except Exception:
+                logger.warning("worker heartbeat failed", exc_info=True)
+
+    async def _finalize(self, run_id: UUID, result: dict[str, Any]) -> None:
+        async with self.session_factory() as session:
+            repo = SqlAlchemyRepository(session)
+            run = await repo.get_run_model(run_id)
+            if run is None or run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                return
+            project_id = UUID(result["project_id"]) if result.get("project_id") else None
+            approved = bool(result.get("approved"))
+            handoff = bool(result.get("handoff")) or (
+                not approved and result.get("attempts_used", 0) >= self.settings.max_coder_attempts
+            )
+            if not project_id:
+                raise RuntimeError("graph finished without a project")
+            project = await repo.get_project(project_id)
+            if project is None:
+                raise RuntimeError("graph finished with an unknown project")
+
+            if not await repo.has_user_turn(run_id):
+                await repo.add_conversation_turn(
+                    run.owner_id, run.message, ConversationSender.USER, run_id, project_id
+                )
+            files = await self.workspace.read_all(project_id)
+            artifact_ids = await self._create_artifacts(repo, run_id, result.get("code", []))
+            await session.commit()
+            if approved:
+                await self.workspace.publish(project_id, files, artifact_ids)
+            else:
+                for item in result.get("code", []):
+                    artifact_id = artifact_ids.get(item["file_path"])
+                    if artifact_id:
+                        await self.workspace.write_artifact(
+                            artifact_id, item["file_path"], item["content"]
+                        )
+
+            feedback = result.get("feedback") or {}
+            summary = feedback.get("summary") or "Run finished."
+            if approved:
+                reply = f"Approved. Generated {len(files)} files. {summary}"
+                await repo.update_run(
+                    run_id,
+                    status=RunStatus.COMPLETED,
+                    chat_reply=reply,
+                    plan=result.get("plan"),
+                    latest_code=result.get("code", []),
+                    feedback=feedback,
+                    checks=result.get("checks"),
+                    error=None,
+                )
+                await repo.add_conversation_turn(
+                    run.owner_id, reply, ConversationSender.ASSISTANT, run_id, project_id
+                )
+            elif handoff:
+                reply = None
+                await repo.update_run(
+                    run_id,
+                    status=RunStatus.AWAITING_USER,
+                    chat_reply=reply,
+                    plan=result.get("plan"),
+                    latest_code=result.get("code", []),
+                    feedback=feedback,
+                    checks=result.get("checks"),
+                    error=None,
+                )
+                await repo.append_event(
+                    run_id,
+                    EventKind.HANDOFF,
+                    {
+                        "summary": summary,
+                        "issues": feedback.get("issues", []),
+                        "attempts_used": result.get("attempts_used", 0),
+                        "attempts_total": result.get("attempts_total", 0),
+                    },
+                )
+            else:
+                await self._mark_failed(
+                    repo,
+                    run,
+                    "The reviewer rejected the result but the run did not reach a handoff.",
+                )
+                await session.commit()
+                return
+            await repo.update_project_summary(project_id, summary[:2000])
+            await repo.append_event(
+                run_id,
+                EventKind.RUN_END,
+                {
+                    "status": RunStatus.COMPLETED.value
+                    if approved
+                    else RunStatus.AWAITING_USER.value
+                },
+            )
+            await session.commit()
+            await self.memory.save_round(
+                run.owner_id,
+                project_id,
+                project.title,
+                "completed" if approved else "awaiting_user",
+                summary=summary,
+                last_feature=run.message[:500],
+            )
+
+    async def _create_artifacts(self, repo, run_id: UUID, code: list[dict[str, Any]]):
+        from sqlalchemy import select
+
+        existing = list(
+            (
+                await repo.session.execute(select(Artifact).where(Artifact.run_id == run_id))
+            ).scalars()
+        )
+        by_path = {artifact.file_path: artifact.id for artifact in existing}
+        for item in code:
+            if item["file_path"] in by_path:
+                continue
+            file_type = FileType(item["file_path"].rsplit(".", 1)[-1].lower())
+            artifact = await repo.add_artifact(
+                run_id, item["file_path"], file_type, item["checksum"]
+            )
+            by_path[item["file_path"]] = artifact.id
+        return by_path
+
+    async def _fail(self, run_id: UUID, exc: Exception) -> None:
+        async with self.session_factory() as session:
+            repo = SqlAlchemyRepository(session)
+            run = await repo.get_run_model(run_id)
+            if run is None:
+                return
+            await self._mark_failed(
+                repo, run, f"{type(exc).__name__}: {exc}", tag=getattr(exc, "tag", "internal_error")
+            )
+            await session.commit()
+
+    async def _mark_failed(self, repo, run, message: str, tag: str = "internal_error") -> None:
+        await repo.update_run(
+            run.id, status=RunStatus.FAILED, error=message[:2000], chat_reply=message[:2000]
+        )
+        await repo.append_event(run.id, EventKind.ERROR, {"tag": tag, "message": message[:2000]})
+        await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
+        if run.project_id:
+            if not await repo.has_user_turn(run.id):
+                await repo.add_conversation_turn(
+                    run.owner_id, run.message, ConversationSender.USER, run.id, run.project_id
+                )
+            await repo.add_conversation_turn(
+                run.owner_id,
+                message[:2000],
+                ConversationSender.ASSISTANT,
+                run.id,
+                run.project_id,
+            )
+            project = await repo.get_project(run.project_id)
+            await self.memory.save_round(
+                run.owner_id,
+                run.project_id,
+                project.title if project else None,
+                "failed",
+                summary=message[:2000],
+                last_feature=run.message[:500],
+            )

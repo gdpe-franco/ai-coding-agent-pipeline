@@ -20,6 +20,8 @@ data/
 
 # Build outputs
 client/dist/
+client/node_modules/
+*.tsbuildinfo
 server/dist/
 
 # OS / editor

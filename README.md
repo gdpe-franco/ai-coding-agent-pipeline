@@ -3,8 +3,9 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** planning phase. This repository holds the architecture, Docker scaffolding, and dependency
-> manifest. `server/app/` and `client/` are not implemented yet; the stack below is the target design.
+> **Status:** MVP implemented. The backend, worker, SPA, tests, migration, and evaluation harness run against
+> PostgreSQL. The Azure provider path is implemented but unverified because deployment names and
+> credentials were not available; the missing-credentials failure path is verified.
 
 ## How it works
 
@@ -30,19 +31,19 @@ preview --> files : copied static files
 @enduml
 ```
 
-The API only enqueues runs. A separate worker claims them from PostgreSQL and executes the LangGraph workflow
-(planner → coder → reviewer). The Coder gets three attempts; only a completed result or a handoff reaches the
-user. If no project is selected, a resolver agent chooses one from the user's history or creates it. The SPA
-polls run state and events.
+After login, the user lands in one persistent private chat; it restores the user's ordered conversation history
+and is the only item in the main navigation. A separate worker claims coding runs from PostgreSQL and executes
+the LangGraph workflow (planner → coder → reviewer). Message submission and project-selection actions are added
+by the follow-on chat stories.
 
 The [technical design document](docs/architecture.md) is the source of truth for the stack, contracts, security
 rules, schema, trade-offs, and the presentation guide. The PRD, in the ignored `tasks/` directory, owns user
 stories and acceptance criteria.
 
-## Run the local stack (target)
+## Run the local stack
 
-1. Copy `.env.example` to `.env` and set `DATABASE_URL`, `SECRET_KEY`, and the Azure key and deployments. See
-   the [environment table](docs/architecture.md#93-environment-variables).
+1. Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD`, `SECRET_KEY`, and the Azure key and deployments.
+   See the [environment table](docs/architecture.md#93-environment-variables).
 2. Build and start:
 
    ```bash
@@ -58,9 +59,19 @@ stories and acceptance criteria.
    - API `http://localhost:8000/api/v1`
    - Preview `http://preview.localhost:8000`
 
-Manual development: start PostgreSQL 17, run `alembic upgrade head` and
-`uvicorn app.main:create_app --factory --reload` from `server/`, start `python -m app.worker`, and run Vite
-from `client/`. See the [serving contract](docs/architecture.md#92-serving-and-topology).
+Manual development from `server/`:
+
+```bash
+pip install -e '.[dev]'
+alembic upgrade head
+uvicorn app.main:create_app --factory --reload
+python -m app.worker
+ruff check . && ruff format --check . && pytest
+python -m evals.runner
+```
+
+Run the SPA with `npm ci && npm run dev` from `client/`; Vite proxies `/api` to port 8000. See the
+[serving contract](docs/architecture.md#92-serving-and-topology).
 
 ## Security
 
@@ -76,12 +87,12 @@ See [API design](docs/architecture.md#6-api-design) and the
 
 ## Repository layout
 
-- `client/` — planned Vue 3 / TypeScript SPA.
-- `server/` — FastAPI / LangGraph backend, worker, tests, and evaluation harness.
+- `client/` — Vue 3 / TypeScript SPA built with Vite and Tailwind.
+- `server/` — FastAPI / LangGraph backend, worker, Alembic migration, tests, and evaluation harness.
 - `shared/` — reserved for shared contracts.
 - `docs/` — architecture.
 - `tasks/` — ignored working briefs and the PRD.
-- `Dockerfile`, `docker-compose.yml`, `.env.example` — target local stack.
+- `Dockerfile`, `docker-compose.yml`, `.env.example` — local stack.
 
 ## Design notes
 

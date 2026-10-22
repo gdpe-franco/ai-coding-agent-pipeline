@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+from app.domain.enums import FileType
+from app.domain.errors import WorkspaceError
+from app.infrastructure.workspace.web import WebWorkspace
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    return WebWorkspace(tmp_path, node_binary="definitely-missing-node")
+
+
+async def test_write_read_and_list_are_scoped(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    await workspace.write_file(project_id, "index.html", "<h1>hi</h1>", {"index.html"})
+    assert await workspace.read_file(project_id, "index.html") == "<h1>hi</h1>"
+    assert await workspace.list_files(project_id) == ["index.html"]
+    assert await workspace.read_all(project_id) == {"index.html": "<h1>hi</h1>"}
+
+
+async def test_write_outside_plan_is_refused(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    with pytest.raises(WorkspaceError):
+        await workspace.write_file(project_id, "other.txt", "x", {"index.html"})
+
+
+async def test_non_plan_files_stay_unchanged(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    await workspace.write_file(project_id, "keep.css", "a{}", {"keep.css"})
+    await workspace.write_file(project_id, "index.html", "<p>1</p>", {"keep.css", "index.html"})
+    await workspace.write_file(project_id, "index.html", "<p>2</p>", {"keep.css", "index.html"})
+    assert await workspace.read_file(project_id, "keep.css") == "a{}"
+    assert await workspace.read_file(project_id, "index.html") == "<p>2</p>"
+
+
+async def test_path_traversal_is_rejected(workspace: WebWorkspace) -> None:
+    with pytest.raises(WorkspaceError):
+        await workspace.read_file(uuid4(), "../escape.txt")
+
+
+async def test_check_readable_reports_missing_empty_and_types(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    await workspace.write_file(project_id, "index.html", "<h1>x</h1>", {"index.html"})
+    report = await workspace.check_readable(project_id, ["index.html", "missing.css"])
+    assert not report.ok
+    assert report.files_checked == 1
+    assert any("missing planned file" in issue for issue in report.issues)
+
+
+async def test_js_syntax_check_fails_when_node_is_absent(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    await workspace.write_file(project_id, "app.js", "const a = 1;", {"app.js"})
+    report = await workspace.check_readable(project_id, ["app.js"])
+    assert not report.js_syntax_ok
+    assert any("node binary" in issue for issue in report.issues)
+
+
+async def test_publish_and_artifacts_round_trip(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    artifact_id = uuid4()
+    await workspace.write_file(project_id, "index.html", "<h1>x</h1>", {"index.html"})
+    await workspace.publish(project_id, {"index.html": "<h1>x</h1>"}, {"index.html": artifact_id})
+    assert await workspace.read_preview(project_id, "index.html") == b"<h1>x</h1>"
+    assert await workspace.read_artifact(artifact_id, "index.html") == "<h1>x</h1>"
+    await workspace.delete_artifact(artifact_id)
+    await workspace.delete_project(project_id)
+    assert await workspace.list_files(project_id) == []
+
+
+def test_file_type_enum_has_allowed_values() -> None:
+    assert FileType.HTML.value == "html"

@@ -1,0 +1,6 @@
+{
+  "name": "flappy-bird",
+  "request": "Build a tiny Flappy Bird clone using canvas and keyboard input.",
+  "expected_files": ["index.html", "game.js"],
+  "expected_outcome": "completed"
+}

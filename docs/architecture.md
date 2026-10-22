@@ -864,10 +864,11 @@ unique index on `conversation_turns(conversation_id)` for request states `receiv
 and `(conversation_id, project_id, sequence)` for project-filtered history. Every coding request turn links to
 at most one run; lock the turn when creating that run so confirmation and claim retries cannot duplicate it.
 
-Schema migrations must preserve existing chat messages and their project/run links when consolidating
-project-scoped conversations into the owner's ordered user-wide chat. Existing runs without a project must
-be explicitly resolved or failed with a recorded reason before enforcing the non-null project constraint;
-a migration must not guess their target or silently discard them.
+Before production, the initial Alembic migration is the canonical schema and may be updated while the local
+database is reset; do not deploy an edited initial migration over an existing database. Once production data
+exists, freeze that migration and use additive migrations that preserve chat messages and their project/run
+links when changing the schema. Runs without a project must be explicitly resolved or failed with a recorded
+reason before enforcing the non-null project constraint; a migration must not guess their target or discard them.
 
 ### 8.2 Durable queue and worker
 
