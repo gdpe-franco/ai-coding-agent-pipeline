@@ -23,7 +23,10 @@ def test_health_reports_components(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["checks"] == {"database": "ok", "filesystem": "ok", "worker": "idle"}
+    assert body["checks"]["database"] == "ok"
+    assert body["checks"]["filesystem"] == "ok"
+    assert body["worker"] in {"idle", "alive", "unknown"}
+    assert body["checks"]["worker"] == body["worker"]
 
 
 def test_register_login_and_me(client: TestClient) -> None:

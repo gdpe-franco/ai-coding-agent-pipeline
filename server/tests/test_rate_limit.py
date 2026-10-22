@@ -14,6 +14,7 @@ from app.infrastructure.rate_limit.postgres import (
     PostgresRateLimiter,
     RateLimitUnavailable,
 )
+from tests.conftest import create_test_user
 
 pytestmark = pytest.mark.usefixtures("require_database")
 
@@ -21,38 +22,25 @@ pytestmark = pytest.mark.usefixtures("require_database")
 async def _seed_run(session_factory):
     async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
-        from app.infrastructure.persistence.models import User
-
-        user = User(
-            email=f"{uuid4().hex}@example.com",
-            hashed_password="x",
-            is_active=True,
-            is_verified=True,
-            is_superuser=False,
-        )
-        session.add(user)
-        await session.flush()
+        user = await create_test_user(session, f"{uuid4().hex}@example.com")
         run = await repo.create_run(user.id, "build", None)
         return run.id
 
 
-async def test_claim_pending_and_stale_running(db_engine) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    run_id = await _seed_run(factory)
-    async with factory() as session:
+async def test_claim_pending_and_stale_running(session_factory) -> None:
+    run_id = await _seed_run(session_factory)
+    async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         claimed = await repo.claim("worker-a")
         assert claimed is not None and claimed.id == run_id
         assert claimed.status == RunStatus.RUNNING
         await repo.release(run_id)
 
-    async with factory() as session:
+    async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         assert await repo.claim("worker-b") is None
 
-    async with factory() as session:
+    async with session_factory() as session:
         await session.execute(
             update(Run)
             .where(Run.id == run_id)
@@ -60,32 +48,26 @@ async def test_claim_pending_and_stale_running(db_engine) -> None:
         )
         await session.commit()
 
-    async with factory() as session:
+    async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         claimed = await repo.claim("worker-c")
         assert claimed is not None and claimed.id == run_id
 
 
-async def test_awaiting_user_is_not_claimable(db_engine) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    run_id = await _seed_run(factory)
-    async with factory() as session:
+async def test_awaiting_user_is_not_claimable(session_factory) -> None:
+    run_id = await _seed_run(session_factory)
+    async with session_factory() as session:
         await session.execute(
             update(Run).where(Run.id == run_id).values(status=RunStatus.AWAITING_USER)
         )
         await session.commit()
-    async with factory() as session:
+    async with session_factory() as session:
         assert await SqlAlchemyRepository(session).claim("worker") is None
 
 
-async def test_rate_limiter_counts_and_blocks(db_engine) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+async def test_rate_limiter_counts_and_blocks(session_factory) -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-    limiter = PostgresRateLimiter(factory, "secret", limits={"auth": 2}, clock=lambda: now)
+    limiter = PostgresRateLimiter(session_factory, "secret", limits={"auth": 2}, clock=lambda: now)
     first = await limiter.consume("auth", "1.2.3.4")
     second = await limiter.consume("auth", "1.2.3.4")
     third = await limiter.consume("auth", "1.2.3.4")

@@ -34,13 +34,24 @@ class FakeRepo:
     turns: dict[UUID, list] = field(default_factory=dict)
     graph_events: list[tuple] = field(default_factory=list)
 
-    async def get_owned_project(self, project_id: UUID, owner_id: UUID):
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def get_owned_project_context(self, project_id: UUID, owner_id: UUID):
         project = self.projects.get(project_id)
         if project is None or project.owner_id != owner_id:
             return None
         return project
 
-    async def create_project(self, owner_id: UUID, title: str, summary: str = "") -> FakeProject:
+    async def create_project_context(
+        self, owner_id: UUID, title: str, summary: str = ""
+    ) -> FakeProject:
         project = FakeProject(id=uuid4(), owner_id=owner_id, title=title, summary=summary)
         self.projects[project.id] = project
         self.turns[project.id] = []
@@ -73,20 +84,6 @@ class FakeRepo:
 
     async def recent_runs(self, owner_id: UUID, limit: int = 10):
         return []
-
-
-class FakeSession:
-    def __init__(self, repo: FakeRepo) -> None:
-        self.repo = repo
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        return None
-
-    async def commit(self) -> None:
-        return None
 
 
 class FakeWorkspace:
@@ -163,7 +160,6 @@ class ScenarioResult:
 
 async def run_scenario(name: str, config: dict[str, Any]) -> ScenarioResult:
     repo = FakeRepo()
-    session = FakeSession(repo)
     workspace = FakeWorkspace()
     owner_id = uuid4()
     existing_project = None
@@ -192,10 +188,9 @@ async def run_scenario(name: str, config: dict[str, Any]) -> ScenarioResult:
         llm_clients=clients,
         workspace=workspace,
         memory=FakeMemory(),
-        repo_factory=lambda: session,
+        repo_factory=lambda: repo,
         max_coder_attempts=3,
     )
-    graph._repo = lambda current: repo  # type: ignore[assignment]
 
     state = {
         "run_id": str(uuid4()),

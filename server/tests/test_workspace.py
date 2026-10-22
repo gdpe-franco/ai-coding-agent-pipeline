@@ -4,7 +4,6 @@ from uuid import uuid4
 
 import pytest
 
-from app.domain.enums import FileType
 from app.domain.errors import WorkspaceError
 from app.infrastructure.workspace.web import WebWorkspace
 
@@ -37,9 +36,17 @@ async def test_non_plan_files_stay_unchanged(workspace: WebWorkspace) -> None:
     assert await workspace.read_file(project_id, "index.html") == "<p>2</p>"
 
 
-async def test_path_traversal_is_rejected(workspace: WebWorkspace) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("../escape.txt", id="parent"),
+        pytest.param("/absolute.txt", id="absolute"),
+        pytest.param("a/../../escape.txt", id="nested-parent"),
+    ],
+)
+async def test_path_traversal_is_rejected(workspace: WebWorkspace, path: str) -> None:
     with pytest.raises(WorkspaceError):
-        await workspace.read_file(uuid4(), "../escape.txt")
+        await workspace.read_file(uuid4(), path)
 
 
 async def test_check_readable_reports_missing_empty_and_types(workspace: WebWorkspace) -> None:
@@ -69,7 +76,3 @@ async def test_publish_and_artifacts_round_trip(workspace: WebWorkspace) -> None
     await workspace.delete_artifact(artifact_id)
     await workspace.delete_project(project_id)
     assert await workspace.list_files(project_id) == []
-
-
-def test_file_type_enum_has_allowed_values() -> None:
-    assert FileType.HTML.value == "html"

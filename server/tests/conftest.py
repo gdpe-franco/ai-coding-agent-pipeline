@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.infrastructure.persistence.models import User
+from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from app.main import create_app
 from app.settings import Settings
 
@@ -59,11 +63,24 @@ def clean_tables(database_available: bool) -> Iterator[None]:
 
 @pytest.fixture
 async def db_engine():
-    from sqlalchemy.ext.asyncio import create_async_engine
-
     engine = create_async_engine(Settings().database_url)
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture
+def session_factory(db_engine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+def repo_factory(session_factory):
+    @asynccontextmanager
+    async def repository() -> AsyncIterator[SqlAlchemyRepository]:
+        async with session_factory() as session:
+            yield SqlAlchemyRepository(session)
+
+    return repository
 
 
 @pytest.fixture
@@ -98,3 +115,16 @@ def register_and_login(client: TestClient, email: str) -> str:
 
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def create_test_user(session: AsyncSession, email: str) -> User:
+    user = User(
+        email=email,
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+        is_superuser=False,
+    )
+    session.add(user)
+    await session.flush()
+    return user

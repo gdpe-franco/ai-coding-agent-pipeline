@@ -15,6 +15,7 @@ from app.application.agent_schemas import (
     ResolverResponse,
     ReviewerResponse,
 )
+from app.application.ports import RepositoryFactory
 from app.application.prompts import (
     coder_messages,
     planner_messages,
@@ -24,7 +25,7 @@ from app.application.prompts import (
 from app.domain.enums import EventKind, FileType, ReviewerVerdict
 from app.domain.errors import ModelError, ResolverError
 from app.domain.models import Code, Feedback, Issue, Plan, PlanStep, validate_file_type
-from app.infrastructure.persistence.repository import (
+from app.domain.serialization import (
     checksum,
     code_payload,
     feedback_payload,
@@ -61,7 +62,7 @@ class CodingGraph:
         llm_clients: dict[str, Any],
         workspace: Any,
         memory: Any,
-        repo_factory: Any,
+        repo_factory: RepositoryFactory,
         max_coder_attempts: int = 3,
         checkpointer: Any | None = None,
     ) -> None:
@@ -97,18 +98,19 @@ class CodingGraph:
         return await self.graph.ainvoke(state, config=config)
 
     async def resolve(self, state: GraphState) -> GraphState:
-        async with self.repo_factory() as session:
-            repo = self._repo(session)
+        async with self.repo_factory() as repo:
             project_id = state.get("project_id")
             if project_id:
-                project = await repo.get_owned_project(UUID(project_id), UUID(state["owner_id"]))
+                project = await repo.get_owned_project_context(
+                    UUID(project_id), UUID(state["owner_id"])
+                )
                 if project is None:
                     raise ResolverError("project is not owned by the run owner")
                 title = project.title
                 await self._graph_event(
                     repo, state, "resolve", {"project_id": str(project.id), "explicit": True}
                 )
-                await session.commit()
+                await repo.commit()
                 return {"project_id": str(project.id), "project_title": title}
 
             client = self.llm_clients["resolver"]
@@ -128,11 +130,13 @@ class CodingGraph:
 
             project = None
             if parsed.project_id is not None:
-                project = await repo.get_owned_project(parsed.project_id, UUID(state["owner_id"]))
+                project = await repo.get_owned_project_context(
+                    parsed.project_id, UUID(state["owner_id"])
+                )
                 if project is None:
                     raise ResolverError("resolver selected a project outside the owner's scope")
             if project is None:
-                project = await repo.create_project(
+                project = await repo.create_project_context(
                     UUID(state["owner_id"]), parsed.title, parsed.reason
                 )
             await repo.update_run(UUID(state["run_id"]), project_id=project.id)
@@ -141,19 +145,18 @@ class CodingGraph:
                 EventKind.PROJECT_RESOLVED,
                 {"project_id": str(project.id), "title": project.title, "reason": parsed.reason},
             )
-            await session.commit()
+            await repo.commit()
             await self._graph_event(
                 repo,
                 state,
                 "resolve",
                 {"project_id": str(project.id), "created": parsed.project_id is None},
             )
-            await session.commit()
+            await repo.commit()
             return {"project_id": str(project.id), "project_title": project.title}
 
     async def planner(self, state: GraphState) -> GraphState:
-        async with self.repo_factory() as session:
-            repo = self._repo(session)
+        async with self.repo_factory() as repo:
             project_id = UUID(state["project_id"])  # type: ignore[arg-type]
             memory = await self.memory.load_project_memory(UUID(state["owner_id"]), project_id)
             turns = await repo.list_conversation_turns(UUID(state["owner_id"]), project_id)
@@ -187,9 +190,9 @@ class CodingGraph:
             await repo.append_event(
                 UUID(state["run_id"]), EventKind.PLANNER, {"plan": plan_payload(plan)}
             )
-            await session.commit()
+            await repo.commit()
             await self._graph_event(repo, state, "planner", {"steps": len(plan.steps)})
-            await session.commit()
+            await repo.commit()
             return {
                 "plan": {
                     "id": str(plan.id),
@@ -210,8 +213,7 @@ class CodingGraph:
             }
 
     async def coder(self, state: GraphState) -> GraphState:
-        async with self.repo_factory() as session:
-            repo = self._repo(session)
+        async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
             attempts_used = state.get("attempts_used", 0) + 1
             attempts_total = state.get("attempts_total", 0) + 1
@@ -264,11 +266,11 @@ class CodingGraph:
                     {"file_path": item.file_path, "checksum": item.checksum},
                 )
             await repo.update_run(run_id, latest_code=code)
-            await session.commit()
+            await repo.commit()
             await self._graph_event(
                 repo, state, "coder", {"attempt": attempts_used, "files": len(code)}
             )
-            await session.commit()
+            await repo.commit()
             return {
                 "code": code,
                 "attempts_used": attempts_used,
@@ -276,8 +278,7 @@ class CodingGraph:
             }
 
     async def reviewer(self, state: GraphState) -> GraphState:
-        async with self.repo_factory() as session:
-            repo = self._repo(session)
+        async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
             plan = plan_from_payload(state["plan"])
             check_report = await self.workspace.check_readable(
@@ -317,11 +318,11 @@ class CodingGraph:
                 EventKind.REVIEWER,
                 {"verdict": verdict.value, "summary": feedback.summary, "issues": len(issues)},
             )
-            await session.commit()
+            await repo.commit()
             await self._graph_event(
                 repo, state, "reviewer", {"verdict": verdict.value, "checks_ok": check_report.ok}
             )
-            await session.commit()
+            await repo.commit()
             return {
                 "feedback": feedback_data,
                 "checks": checks_data,
@@ -339,11 +340,6 @@ class CodingGraph:
         if state.get("attempts_used", 0) >= self.max_coder_attempts:
             return "end"
         return "coder"
-
-    def _repo(self, session):
-        from app.infrastructure.persistence.repository import SqlAlchemyRepository
-
-        return SqlAlchemyRepository(session)
 
     async def _graph_event(
         self, repo, state: GraphState, node: str, payload: dict[str, Any]

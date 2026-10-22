@@ -28,7 +28,7 @@ async def run_worker(settings: Settings) -> None:
                 await store.setup()
                 graph = container.build_graph(saver)
                 processor = RunProcessor(
-                    session_factory=container.session_factory,
+                    repo_factory=container.repository_context,
                     graph=graph,
                     workspace=container.workspace,
                     memory=container.memory,

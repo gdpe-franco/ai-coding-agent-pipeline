@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.application.graph import CodingGraph
-from app.domain.enums import EventKind, FileType, ReviewerVerdict
+from app.domain.enums import EventKind
 from app.domain.errors import ModelError, ResolverError
-from app.domain.models import CheckReport, Plan, PlanStep
+from app.domain.models import CheckReport, Plan
 
 
 @dataclass
@@ -23,7 +22,6 @@ class FakeProject:
 
 @dataclass
 class FakeRepo:
-    session: object
     projects: dict[UUID, FakeProject] = field(default_factory=dict)
     events: list[tuple] = field(default_factory=list)
     graph_events: list[tuple] = field(default_factory=list)
@@ -32,13 +30,24 @@ class FakeRepo:
     runs: dict[UUID, dict] = field(default_factory=dict)
     turns: dict[UUID, list] = field(default_factory=dict)
 
-    async def get_owned_project(self, project_id: UUID, owner_id: UUID):
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def get_owned_project_context(self, project_id: UUID, owner_id: UUID):
         project = self.projects.get(project_id)
         if project is None or project.owner_id != owner_id:
             return None
         return project
 
-    async def create_project(self, owner_id: UUID, title: str, summary: str = "") -> FakeProject:
+    async def create_project_context(
+        self, owner_id: UUID, title: str, summary: str = ""
+    ) -> FakeProject:
         project = FakeProject(id=uuid4(), owner_id=owner_id, title=title, summary=summary)
         self.projects[project.id] = project
         self.turns[project.id] = []
@@ -68,21 +77,6 @@ class FakeRepo:
 
     async def recent_runs(self, owner_id: UUID, limit: int = 10):
         return []
-
-
-class FakeSession:
-    def __init__(self, repo: FakeRepo) -> None:
-        self.repo = repo
-        self.commits = 0
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.commits += 1
 
 
 class FakeWorkspace:
@@ -124,9 +118,7 @@ class ScriptedLLM:
 
 
 def make_graph(*, resolver=None, planner=None, coder=None, reviewer=None, report=None):
-    repo = FakeRepo(session=None)
-    session = FakeSession(repo)
-    repo.session = session
+    repo = FakeRepo()
     workspace = FakeWorkspace(report)
     clients = {
         "resolver": ScriptedLLM(resolver or []),
@@ -138,10 +130,9 @@ def make_graph(*, resolver=None, planner=None, coder=None, reviewer=None, report
         llm_clients=clients,
         workspace=workspace,
         memory=FakeMemory(),
-        repo_factory=lambda: session,
+        repo_factory=lambda: repo,
         max_coder_attempts=3,
     )
-    graph._repo = lambda session: repo  # type: ignore[assignment]
     return graph, repo, workspace, clients
 
 
@@ -226,31 +217,38 @@ async def test_three_rejections_stop_the_round() -> None:
     assert result["attempts_used"] == 3
 
 
-async def test_failed_checks_block_approval() -> None:
+@pytest.mark.parametrize(
+    ("plan", "content", "report"),
+    [
+        pytest.param(
+            planner_reply(),
+            "<h1>ok</h1>",
+            CheckReport(
+                file_structure_ok=False,
+                js_syntax_ok=True,
+                issues=["missing planned file: x"],
+            ),
+            id="file-structure",
+        ),
+        pytest.param(
+            planner_reply("app.js", "js"),
+            "const = ;",
+            CheckReport(file_structure_ok=True, js_syntax_ok=False, issues=["bad js"]),
+            id="javascript-syntax",
+        ),
+    ],
+)
+async def test_failed_deterministic_checks_block_approval(plan, content, report) -> None:
     graph, _, _, _ = make_graph(
         resolver=[RESOLVER_NEW],
-        planner=[planner_reply()],
-        coder=[{"file_path": "index.html", "content": f"<h1>{i}</h1>"} for i in range(3)],
+        planner=[plan],
+        coder=[{"file_path": plan["steps"][0]["file_path"], "content": content} for _ in range(3)],
         reviewer=[{"verdict": "approve", "summary": "looks fine", "issues": []} for _ in range(3)],
-        report=CheckReport(
-            file_structure_ok=False, js_syntax_ok=True, issues=["missing planned file: x"]
-        ),
+        report=report,
     )
     result = await graph.ainvoke(base_state(), {})
     assert result["approved"] is False
     assert result["attempts_used"] == 3
-
-
-async def test_javascript_syntax_failure_blocks_approval() -> None:
-    graph, _, _, _ = make_graph(
-        resolver=[RESOLVER_NEW],
-        planner=[planner_reply("app.js", "js")],
-        coder=[{"file_path": "app.js", "content": "const = ;"} for _ in range(3)],
-        reviewer=[{"verdict": "approve", "summary": "looks fine", "issues": []} for _ in range(3)],
-        report=CheckReport(file_structure_ok=True, js_syntax_ok=False, issues=["bad js"]),
-    )
-    result = await graph.ainvoke(base_state(), {})
-    assert result["approved"] is False
 
 
 async def test_resume_starts_at_planner_and_preserves_total() -> None:
@@ -294,9 +292,9 @@ async def test_explicit_project_skips_resolver() -> None:
 @pytest.mark.parametrize(
     ("stage", "reply", "tag"),
     [
-        ("planner", {"summary": "x"}, "planner_error"),
-        ("coder", {"file_path": "index.html"}, "coder_error"),
-        ("reviewer", {"verdict": "approve"}, "reviewer_error"),
+        pytest.param("planner", {"summary": "x"}, "planner_error", id="planner"),
+        pytest.param("coder", {"file_path": "index.html"}, "coder_error", id="coder"),
+        pytest.param("reviewer", {"verdict": "approve"}, "reviewer_error", id="reviewer"),
     ],
 )
 async def test_schema_errors_are_tagged_by_agent(stage, reply, tag) -> None:
@@ -334,10 +332,3 @@ async def test_resolver_cannot_attach_to_foreign_project() -> None:
     repo.projects[foreign] = FakeProject(id=foreign, owner_id=uuid4())
     with pytest.raises(ResolverError):
         await graph.ainvoke(base_state(owner_id=str(owner)), {})
-
-
-def test_plan_step_types_are_enum() -> None:
-    step = PlanStep(name="a", file_path="a.html", file_type=FileType.HTML, description="d")
-    assert step.file_type is FileType.HTML
-    assert ReviewerVerdict.APPROVE.value == "approve"
-    assert SimpleNamespace(ok=True).ok

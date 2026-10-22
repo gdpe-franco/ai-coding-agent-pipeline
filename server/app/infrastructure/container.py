@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import cached_property
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -31,6 +33,11 @@ class Container:
     def repository(self, session) -> SqlAlchemyRepository:
         return SqlAlchemyRepository(session)
 
+    @asynccontextmanager
+    async def repository_context(self) -> AsyncIterator[SqlAlchemyRepository]:
+        async with self.session_factory() as session:
+            yield self.repository(session)
+
     @cached_property
     def graph_without_checkpointer(self) -> CodingGraph:
         return self.build_graph(None)
@@ -40,7 +47,7 @@ class Container:
             llm_clients=self.llm_clients,
             workspace=self.workspace,
             memory=self.memory,
-            repo_factory=self.session_factory,
+            repo_factory=self.repository_context,
             max_coder_attempts=self.settings.max_coder_attempts,
             checkpointer=checkpointer,
         )

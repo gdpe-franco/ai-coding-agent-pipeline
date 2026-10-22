@@ -6,9 +6,9 @@ from typing import Any
 from uuid import UUID
 
 from app.application.graph import CodingGraph
-from app.domain.enums import ConversationSender, EventKind, FileType, RunStatus
-from app.infrastructure.persistence.models import Artifact
-from app.infrastructure.persistence.repository import SqlAlchemyRepository
+from app.application.ports import RepositoryFactory
+from app.domain.enums import ConversationSender, EventKind, RunStatus
+from app.domain.models import RunState
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +16,14 @@ logger = logging.getLogger(__name__)
 class RunProcessor:
     def __init__(
         self,
-        session_factory,
+        repo_factory: RepositoryFactory,
         graph: CodingGraph,
         workspace,
         memory,
         settings,
         worker_id: str,
     ) -> None:
-        self.session_factory = session_factory
+        self.repo_factory = repo_factory
         self.graph = graph
         self.workspace = workspace
         self.memory = memory
@@ -34,16 +34,14 @@ class RunProcessor:
         thread_id = f"{run.id}:{run.round}"
         heartbeat = asyncio.create_task(self._heartbeat_loop(run.id))
         try:
-            async with self.session_factory() as session:
-                repo = SqlAlchemyRepository(session)
-                graph_run = await repo.get_or_create_graph_run(run.id, run.round, thread_id)
+            async with self.repo_factory() as repo:
+                graph_run_id = await repo.get_or_create_graph_run(run.id, run.round, thread_id)
                 await repo.append_event(
                     run.id,
                     EventKind.RUN_START,
                     {"round": run.round, "worker_id": self.worker_id},
                 )
-                await session.commit()
-                graph_run_id = graph_run.id
+                await repo.commit()
 
             state = {
                 "run_id": str(run.id),
@@ -76,22 +74,21 @@ class RunProcessor:
                 pass
             except Exception:
                 logger.warning("worker heartbeat shutdown failed", exc_info=True)
-            async with self.session_factory() as session:
-                await SqlAlchemyRepository(session).release(run.id)
+            async with self.repo_factory() as repo:
+                await repo.release(run.id)
 
     async def _heartbeat_loop(self, run_id: UUID) -> None:
         while True:
             await asyncio.sleep(self.settings.worker_heartbeat_seconds)
             try:
-                async with self.session_factory() as session:
-                    await SqlAlchemyRepository(session).heartbeat(self.worker_id, run_id)
+                async with self.repo_factory() as repo:
+                    await repo.heartbeat(self.worker_id, run_id)
             except Exception:
                 logger.warning("worker heartbeat failed", exc_info=True)
 
     async def _finalize(self, run_id: UUID, result: dict[str, Any]) -> None:
-        async with self.session_factory() as session:
-            repo = SqlAlchemyRepository(session)
-            run = await repo.get_run_model(run_id)
+        async with self.repo_factory() as repo:
+            run = await repo.get_run(run_id)
             if run is None or run.status != RunStatus.RUNNING:
                 return
             project_id = UUID(result["project_id"]) if result.get("project_id") else None
@@ -101,14 +98,14 @@ class RunProcessor:
             )
             if not project_id:
                 raise RuntimeError("graph finished without a project")
-            project = await repo.get_project(project_id)
+            project = await repo.get_project_context(project_id)
             if project is None:
                 raise RuntimeError("graph finished with an unknown project")
             await repo.associate_unassigned_turns_with_project(run_id, project_id)
 
             files = await self.workspace.read_all(project_id)
-            artifact_ids = await self._create_artifacts(repo, run_id, result.get("code", []))
-            await session.commit()
+            artifact_ids = await repo.ensure_artifacts_for_run(run_id, result.get("code", []))
+            await repo.commit()
             if approved:
                 await self.workspace.publish(project_id, files, artifact_ids)
             else:
@@ -167,7 +164,7 @@ class RunProcessor:
                     run,
                     "The reviewer rejected the result but the run did not reach a handoff.",
                 )
-                await session.commit()
+                await repo.commit()
                 return
             await repo.update_project_summary(project_id, summary[:2000])
             await repo.append_event(
@@ -179,7 +176,7 @@ class RunProcessor:
                     else RunStatus.AWAITING_USER.value
                 },
             )
-            await session.commit()
+            await repo.commit()
             await self.memory.save_round(
                 run.owner_id,
                 project_id,
@@ -189,37 +186,19 @@ class RunProcessor:
                 last_feature=run.message[:500],
             )
 
-    async def _create_artifacts(self, repo, run_id: UUID, code: list[dict[str, Any]]):
-        from sqlalchemy import select
-
-        existing = list(
-            (
-                await repo.session.execute(select(Artifact).where(Artifact.run_id == run_id))
-            ).scalars()
-        )
-        by_path = {artifact.file_path: artifact.id for artifact in existing}
-        for item in code:
-            if item["file_path"] in by_path:
-                continue
-            file_type = FileType(item["file_path"].rsplit(".", 1)[-1].lower())
-            artifact = await repo.add_artifact(
-                run_id, item["file_path"], file_type, item["checksum"]
-            )
-            by_path[item["file_path"]] = artifact.id
-        return by_path
-
     async def _fail(self, run_id: UUID, exc: Exception) -> None:
-        async with self.session_factory() as session:
-            repo = SqlAlchemyRepository(session)
-            run = await repo.get_run_model(run_id)
+        async with self.repo_factory() as repo:
+            run = await repo.get_run(run_id)
             if run is None or run.status != RunStatus.RUNNING:
                 return
             await self._mark_failed(
                 repo, run, f"{type(exc).__name__}: {exc}", tag=getattr(exc, "tag", "internal_error")
             )
-            await session.commit()
+            await repo.commit()
 
-    async def _mark_failed(self, repo, run, message: str, tag: str = "internal_error") -> None:
+    async def _mark_failed(
+        self, repo, run: RunState, message: str, tag: str = "internal_error"
+    ) -> None:
         await repo.update_run(
             run.id, status=RunStatus.FAILED, error=message[:2000], chat_reply=message[:2000]
         )
@@ -235,7 +214,7 @@ class RunProcessor:
             run.project_id,
         )
         if run.project_id:
-            project = await repo.get_project(run.project_id)
+            project = await repo.get_project_context(run.project_id)
             await self.memory.save_round(
                 run.owner_id,
                 run.project_id,

@@ -96,6 +96,13 @@ class RunState:
     error: str | None = None
 
 
+@dataclass(slots=True)
+class ProjectContext:
+    id: UUID
+    title: str
+    summary: str
+
+
 def validate_relative_path(path: str) -> str:
     if not path or path.startswith("/") or ".." in path or "\\" in path:
         raise ValueError("file path must be relative and must not contain '..'")
@@ -120,6 +127,7 @@ __all__ = [
     "Issue",
     "Plan",
     "PlanStep",
+    "ProjectContext",
     "ProjectStatus",
     "ReviewerVerdict",
     "RunState",

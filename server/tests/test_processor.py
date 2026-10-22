@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.application.processor import RunProcessor
 from app.domain.enums import ConversationSender, RunStatus
-from app.infrastructure.persistence.models import User
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
+from tests.conftest import create_test_user
 
 pytestmark = pytest.mark.usefixtures("require_database")
 
@@ -25,29 +24,19 @@ class EmptyMemory:
 
 
 @pytest.fixture
-async def processor_context(db_engine, settings):
-    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+async def processor_context(session_factory, repo_factory, settings):
     async with session_factory() as session:
-        user = User(
-            email="chat-results@example.com",
-            hashed_password="x",
-            is_active=True,
-            is_verified=True,
-            is_superuser=False,
-        )
-        session.add(user)
-        await session.flush()
-        repo = SqlAlchemyRepository(session)
-        project = await repo.create_project(user.id, "Result project")
+        user = await create_test_user(session, "chat-results@example.com")
+        await session.commit()
     processor = RunProcessor(
-        session_factory,
+        repo_factory=repo_factory,
         graph=None,
         workspace=EmptyWorkspace(),
         memory=EmptyMemory(),
         settings=settings,
         worker_id="test-worker",
     )
-    return session_factory, processor, user, project
+    return session_factory, processor, user
 
 
 @pytest.mark.parametrize(
@@ -80,9 +69,10 @@ async def processor_context(db_engine, settings):
 async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
     processor_context, result, expected_status, expected_reply
 ) -> None:
-    session_factory, processor, user, project = processor_context
+    session_factory, processor, user = processor_context
     async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
+        project = await repo.create_project(user.id, "Result project")
         run = await repo.create_run(user.id, "request", project.id)
         await repo.update_run(run.id, status=RunStatus.RUNNING)
     await processor._finalize(
@@ -111,7 +101,7 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
 
 
 async def test_failure_is_saved_as_assistant_turn(processor_context) -> None:
-    session_factory, processor, user, _ = processor_context
+    session_factory, processor, user = processor_context
     async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         run = await repo.create_run(user.id, "request", None)

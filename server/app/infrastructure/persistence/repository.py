@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -15,10 +14,10 @@ from app.domain.enums import (
     ConversationSender,
     EventKind,
     FileType,
-    ReviewerVerdict,
     RunStatus,
 )
-from app.domain.models import Code, Feedback, Issue, Plan, PlanStep, RunState
+from app.domain.models import Feedback, Plan, ProjectContext, RunState
+from app.domain.serialization import plan_payload
 from app.infrastructure.persistence.models import (
     Artifact,
     Conversation,
@@ -57,9 +56,16 @@ def _run_state(run: Run) -> RunState:
     )
 
 
+def _project_context(project: Project) -> ProjectContext:
+    return ProjectContext(id=project.id, title=project.title, summary=project.summary)
+
+
 class SqlAlchemyRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def commit(self) -> None:
+        await self.session.commit()
 
     async def get_or_create_conversation(self, owner_id: uuid.UUID) -> Conversation:
         await self.session.execute(
@@ -180,7 +186,7 @@ class SqlAlchemyRepository:
 
     async def get_or_create_graph_run(
         self, run_id: uuid.UUID, round_number: int, thread_id: str
-    ) -> GraphRun:
+    ) -> uuid.UUID:
         graph_run = (
             await self.session.execute(
                 select(GraphRun).where(GraphRun.run_id == run_id, GraphRun.round == round_number)
@@ -189,7 +195,7 @@ class SqlAlchemyRepository:
         if graph_run is None:
             graph_run = await self.add_graph_run(run_id, round_number, thread_id)
             await self.session.commit()
-        return graph_run
+        return graph_run.id
 
     async def add_graph_event(
         self, graph_run_id: uuid.UUID, node: str, payload: dict[str, Any]
@@ -210,6 +216,24 @@ class SqlAlchemyRepository:
         self.session.add(artifact)
         await self.session.flush()
         return artifact
+
+    async def ensure_artifacts_for_run(
+        self, run_id: uuid.UUID, code: list[dict[str, Any]]
+    ) -> dict[str, uuid.UUID]:
+        existing = list(
+            (
+                await self.session.execute(select(Artifact).where(Artifact.run_id == run_id))
+            ).scalars()
+        )
+        by_path = {artifact.file_path: artifact.id for artifact in existing}
+        for item in code:
+            if item["file_path"] not in by_path:
+                file_type = FileType(item["file_path"].rsplit(".", 1)[-1].lower())
+                artifact = await self.add_artifact(
+                    run_id, item["file_path"], file_type, item["checksum"]
+                )
+                by_path[item["file_path"]] = artifact.id
+        return by_path
 
     async def get_artifact(self, artifact_id: uuid.UUID) -> Artifact | None:
         return await self.session.get(Artifact, artifact_id)
@@ -294,6 +318,21 @@ class SqlAlchemyRepository:
                 select(Project).where(Project.id == project_id, Project.owner_id == owner_id)
             )
         ).scalar_one_or_none()
+
+    async def create_project_context(
+        self, owner_id: uuid.UUID, title: str, summary: str = ""
+    ) -> ProjectContext:
+        return _project_context(await self.create_project(owner_id, title, summary))
+
+    async def get_project_context(self, project_id: uuid.UUID) -> ProjectContext | None:
+        project = await self.get_project(project_id)
+        return _project_context(project) if project else None
+
+    async def get_owned_project_context(
+        self, project_id: uuid.UUID, owner_id: uuid.UUID
+    ) -> ProjectContext | None:
+        project = await self.get_owned_project(project_id, owner_id)
+        return _project_context(project) if project else None
 
     async def get_project_by_preview(self, preview_id: uuid.UUID) -> Project | None:
         return (
@@ -490,89 +529,5 @@ class SqlAlchemyRepository:
             await self.session.execute(select(func.max(WorkerHeartbeat.last_seen_at)))
         ).scalar_one_or_none()
 
-    async def record_review(self, run_id: uuid.UUID, feedback: Feedback) -> None:
-        await self.add_review(run_id, feedback)
 
-
-def plan_payload(plan: Plan) -> dict[str, Any]:
-    return {
-        "id": str(plan.id),
-        "project_id": str(plan.project_id),
-        "summary": plan.summary,
-        "steps": [
-            {
-                "id": str(step.id),
-                "name": step.name,
-                "file_path": step.file_path,
-                "file_type": step.file_type.value
-                if hasattr(step.file_type, "value")
-                else step.file_type,
-                "description": step.description,
-            }
-            for step in plan.steps
-        ],
-    }
-
-
-def plan_from_payload(payload: dict[str, Any]) -> Plan:
-    steps = [
-        PlanStep(
-            id=uuid.UUID(item["id"]),
-            name=item["name"],
-            file_path=item["file_path"],
-            file_type=FileType(item["file_type"]),
-            description=item["description"],
-        )
-        for item in payload.get("steps", [])
-    ]
-    return Plan(
-        id=uuid.UUID(payload["id"]),
-        project_id=uuid.UUID(payload["project_id"]),
-        summary=payload.get("summary", ""),
-        steps=steps,
-    )
-
-
-def code_payload(code: Code) -> dict[str, Any]:
-    return {
-        "file_path": code.file_path,
-        "content": code.content,
-        "checksum": code.checksum,
-        "file_type": code.file_type.value if hasattr(code.file_type, "value") else code.file_type,
-    }
-
-
-def checksum(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def feedback_payload(feedback: Feedback) -> dict[str, Any]:
-    return {
-        "verdict": feedback.verdict.value,
-        "summary": feedback.summary,
-        "issues": [
-            {"message": issue.message, "file_path": issue.file_path} for issue in feedback.issues
-        ],
-    }
-
-
-def feedback_from_payload(payload: dict[str, Any]) -> Feedback:
-    return Feedback(
-        verdict=ReviewerVerdict(payload["verdict"]),
-        summary=payload.get("summary", ""),
-        issues=[
-            Issue(message=item.get("message", ""), file_path=item.get("file_path"))
-            for item in payload.get("issues", [])
-        ],
-    )
-
-
-__all__ = [
-    "SqlAlchemyRepository",
-    "checksum",
-    "code_payload",
-    "feedback_from_payload",
-    "feedback_payload",
-    "plan_from_payload",
-    "plan_payload",
-]
+__all__ = ["SqlAlchemyRepository"]
