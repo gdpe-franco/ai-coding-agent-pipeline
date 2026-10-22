@@ -73,6 +73,13 @@ class SqlAlchemyRepository:
             )
         ).scalar_one()
 
+    async def get_conversation(self, owner_id: uuid.UUID) -> Conversation | None:
+        return (
+            await self.session.execute(
+                select(Conversation).where(Conversation.owner_id == owner_id)
+            )
+        ).scalar_one_or_none()
+
     async def get_run(self, run_id: uuid.UUID) -> RunState | None:
         run = await self.session.get(Run, run_id)
         return _run_state(run) if run else None
@@ -102,6 +109,9 @@ class SqlAlchemyRepository:
         )
         self.session.add(run)
         await self.session.flush()
+        await self.add_conversation_turn(
+            owner_id, message, ConversationSender.USER, run.id, project_id
+        )
         await self.session.commit()
         return _run_state(run)
 
@@ -347,17 +357,15 @@ class SqlAlchemyRepository:
 
     # Conversations
 
-    async def has_user_turn(self, run_id: uuid.UUID) -> bool:
-        return (
-            await self.session.execute(
-                select(func.count())
-                .select_from(ConversationTurn)
-                .where(
-                    ConversationTurn.run_id == run_id,
-                    ConversationTurn.role == ConversationSender.USER,
-                )
-            )
-        ).scalar_one() > 0
+    async def associate_unassigned_turns_with_project(
+        self, run_id: uuid.UUID, project_id: uuid.UUID
+    ) -> None:
+        await self.session.execute(
+            update(ConversationTurn)
+            .where(ConversationTurn.run_id == run_id, ConversationTurn.project_id.is_(None))
+            .values(project_id=project_id)
+        )
+        await self.session.flush()
 
     async def add_conversation_turn(
         self,
@@ -366,8 +374,13 @@ class SqlAlchemyRepository:
         role: ConversationSender,
         run_id: uuid.UUID | None = None,
         project_id: uuid.UUID | None = None,
-    ) -> None:
+    ) -> ConversationTurn:
         conversation = await self.get_or_create_conversation(owner_id)
+        conversation = (
+            await self.session.execute(
+                select(Conversation).where(Conversation.id == conversation.id).with_for_update()
+            )
+        ).scalar_one()
         sequence = (
             int(
                 (
@@ -380,17 +393,17 @@ class SqlAlchemyRepository:
             )
             + 1
         )
-        self.session.add(
-            ConversationTurn(
-                conversation_id=conversation.id,
-                project_id=project_id,
-                run_id=run_id,
-                role=role,
-                content=content,
-                sequence=sequence,
-            )
+        turn = ConversationTurn(
+            conversation_id=conversation.id,
+            project_id=project_id,
+            run_id=run_id,
+            role=role,
+            content=content,
+            sequence=sequence,
         )
+        self.session.add(turn)
         await self.session.flush()
+        return turn
 
     async def list_conversation_turns(
         self,

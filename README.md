@@ -3,9 +3,9 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** MVP implemented. The backend, worker, SPA, tests, migration, and evaluation harness run against
-> PostgreSQL. The Azure provider path is implemented but unverified because deployment names and
-> credentials were not available; the missing-credentials failure path is verified.
+> **Status:** MVP in progress. Private accounts and persistent chat are implemented. Chat-driven project
+> selection and coding are follow-on stories. Azure provider verification is blocked because deployment names
+> and credentials are not available.
 
 ## How it works
 
@@ -33,8 +33,8 @@ preview --> files : copied static files
 
 After login, the user lands in one persistent private chat; it restores the user's ordered conversation history
 and is the only item in the main navigation. A separate worker claims coding runs from PostgreSQL and executes
-the LangGraph workflow (planner → coder → reviewer). Message submission and project-selection actions are added
-by the follow-on chat stories.
+the LangGraph workflow (planner → coder → reviewer). Chat messages are saved in that transcript; project and
+feature selection actions are added by the follow-on chat stories.
 
 The [technical design document](docs/architecture.md) is the source of truth for the stack, contracts, security
 rules, schema, trade-offs, and the presentation guide. The PRD, in the ignored `tasks/` directory, owns user
@@ -42,8 +42,9 @@ stories and acceptance criteria.
 
 ## Run the local stack
 
-1. Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD`, `SECRET_KEY`, and the Azure key and deployments.
-   See the [environment table](docs/architecture.md#93-environment-variables).
+1. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and use `openssl rand -hex 32` to generate `SECRET_KEY`.
+   Authentication and chat work without model credentials; configure a provider and deployments before using
+   coding runs. See the [environment table](docs/architecture.md#93-environment-variables).
 2. Build and start:
 
    ```bash
@@ -53,13 +54,17 @@ stories and acceptance criteria.
    curl -fsS http://localhost:8000/health
    ```
 
+   `/health` reports database, filesystem, and worker-heartbeat status. The worker has no HTTP server, so its
+   liveness is reported by the app rather than a Docker HTTP healthcheck.
+
 3. Open:
 
    - App `http://localhost:8000`
    - API `http://localhost:8000/api/v1`
    - Preview `http://preview.localhost:8000`
 
-Manual development from `server/`:
+For manual development, start only PostgreSQL with `docker compose up -d db` and point the host-side
+`DATABASE_URL` at the published database port (`localhost:5432` by default). Then run from `server/`:
 
 ```bash
 pip install -e '.[dev]'

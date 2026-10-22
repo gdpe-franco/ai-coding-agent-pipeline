@@ -56,7 +56,10 @@ class RunRepository(Protocol):
     async def get_run(self, run_id: UUID) -> RunState | None: ...
 
     async def create_run(
-        self, owner_id: UUID, message: str, project_id: UUID | None
+        self,
+        owner_id: UUID,
+        message: str,
+        project_id: UUID | None,
     ) -> RunState: ...
 
     async def update_run(self, run_id: UUID, **fields: Any) -> RunState | None: ...

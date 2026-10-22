@@ -71,7 +71,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
         if path.startswith("/api/v1/auth"):
             return "auth"
-        if path == "/api/v1/runs" and request.method == "POST":
+        if path in {"/api/v1/runs", "/api/v1/chat/messages"} and request.method == "POST":
             return "run_create"
         if request.method in {"GET", "HEAD"}:
             return "read"

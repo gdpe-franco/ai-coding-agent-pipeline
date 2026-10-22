@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 
 class ProjectCreate(BaseModel):
@@ -89,6 +89,14 @@ class ChatRead(BaseModel):
     active_feature_run_id: UUID | None = None
     pending_selection: dict[str, Any] | None = None
     turns: list[ConversationTurnRead]
+
+
+class ChatMessageCreate(BaseModel):
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
+
+
+class ChatMessageCreated(BaseModel):
+    turn_id: UUID
 
 
 class PreviewUrlRead(BaseModel):

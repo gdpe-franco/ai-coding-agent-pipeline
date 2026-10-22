@@ -204,6 +204,9 @@ async def resume_run(
     run.locked_by = None
     run.locked_at = None
     run.heartbeat_at = None
+    await repo.add_conversation_turn(
+        run.owner_id, payload.guidance, ConversationSender.USER, run.id, run.project_id
+    )
     await repo.append_event(
         run.id, EventKind.GUIDANCE, {"guidance": payload.guidance, "round": run.round}
     )
@@ -232,10 +235,9 @@ async def close_run(
     run.heartbeat_at = None
     await repo.append_event(run.id, EventKind.ABANDONMENT, {"message": message})
     await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
-    if run.project_id:
-        await repo.add_conversation_turn(
-            run.owner_id, message, ConversationSender.ASSISTANT, run.id, run.project_id
-        )
+    await repo.add_conversation_turn(
+        run.owner_id, message, ConversationSender.ASSISTANT, run.id, run.project_id
+    )
     await repo.session.commit()
     await repo.session.refresh(run)
     return _run_read(run)

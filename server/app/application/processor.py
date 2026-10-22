@@ -92,7 +92,7 @@ class RunProcessor:
         async with self.session_factory() as session:
             repo = SqlAlchemyRepository(session)
             run = await repo.get_run_model(run_id)
-            if run is None or run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+            if run is None or run.status != RunStatus.RUNNING:
                 return
             project_id = UUID(result["project_id"]) if result.get("project_id") else None
             approved = bool(result.get("approved"))
@@ -104,11 +104,8 @@ class RunProcessor:
             project = await repo.get_project(project_id)
             if project is None:
                 raise RuntimeError("graph finished with an unknown project")
+            await repo.associate_unassigned_turns_with_project(run_id, project_id)
 
-            if not await repo.has_user_turn(run_id):
-                await repo.add_conversation_turn(
-                    run.owner_id, run.message, ConversationSender.USER, run_id, project_id
-                )
             files = await self.workspace.read_all(project_id)
             artifact_ids = await self._create_artifacts(repo, run_id, result.get("code", []))
             await session.commit()
@@ -140,7 +137,7 @@ class RunProcessor:
                     run.owner_id, reply, ConversationSender.ASSISTANT, run_id, project_id
                 )
             elif handoff:
-                reply = None
+                reply = f"This run needs your guidance. {summary}"
                 await repo.update_run(
                     run_id,
                     status=RunStatus.AWAITING_USER,
@@ -160,6 +157,9 @@ class RunProcessor:
                         "attempts_used": result.get("attempts_used", 0),
                         "attempts_total": result.get("attempts_total", 0),
                     },
+                )
+                await repo.add_conversation_turn(
+                    run.owner_id, reply, ConversationSender.ASSISTANT, run_id, project_id
                 )
             else:
                 await self._mark_failed(
@@ -212,7 +212,7 @@ class RunProcessor:
         async with self.session_factory() as session:
             repo = SqlAlchemyRepository(session)
             run = await repo.get_run_model(run_id)
-            if run is None:
+            if run is None or run.status != RunStatus.RUNNING:
                 return
             await self._mark_failed(
                 repo, run, f"{type(exc).__name__}: {exc}", tag=getattr(exc, "tag", "internal_error")
@@ -226,17 +226,15 @@ class RunProcessor:
         await repo.append_event(run.id, EventKind.ERROR, {"tag": tag, "message": message[:2000]})
         await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
         if run.project_id:
-            if not await repo.has_user_turn(run.id):
-                await repo.add_conversation_turn(
-                    run.owner_id, run.message, ConversationSender.USER, run.id, run.project_id
-                )
-            await repo.add_conversation_turn(
-                run.owner_id,
-                message[:2000],
-                ConversationSender.ASSISTANT,
-                run.id,
-                run.project_id,
-            )
+            await repo.associate_unassigned_turns_with_project(run.id, run.project_id)
+        await repo.add_conversation_turn(
+            run.owner_id,
+            message[:2000],
+            ConversationSender.ASSISTANT,
+            run.id,
+            run.project_id,
+        )
+        if run.project_id:
             project = await repo.get_project(run.project_id)
             await self.memory.save_round(
                 run.owner_id,

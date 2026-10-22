@@ -49,19 +49,58 @@ def test_chat_is_persistent_and_owner_scoped(client: TestClient) -> None:
     assert alice_chat["conversation_id"] != bob_chat["conversation_id"]
     assert alice_chat["turns"] == bob_chat["turns"] == []
 
+    submitted = client.post(
+        "/api/v1/chat/messages",
+        headers=auth_headers(alice),
+        json={"message": "private message"},
+    )
+    assert submitted.status_code == 202
+    turn_id = submitted.json()["turn_id"]
     with psycopg.connect(Settings().psycopg_url) as connection:
-        connection.execute(
-            "INSERT INTO conversation_turns (id, conversation_id, role, content, sequence) "
-            "VALUES (%s, %s, 'user', 'private message', 1)",
-            (str(uuid4()), alice_chat["conversation_id"]),
-        )
-        connection.commit()
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
 
     alice_history = client.get("/api/v1/chat", headers=auth_headers(alice)).json()["turns"]
     bob_history = client.get("/api/v1/chat", headers=auth_headers(bob)).json()["turns"]
     assert [turn["content"] for turn in alice_history] == ["private message"]
+    assert alice_history[0]["id"] == turn_id
+    assert alice_history[0]["run_id"] is None
     assert bob_history == []
     assert client.get("/api/v1/chat?after=1", headers=auth_headers(alice)).json()["turns"] == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("  ", id="spaces"),
+        pytest.param("\n\t", id="whitespace"),
+    ],
+)
+def test_chat_rejects_blank_message(client: TestClient, message: str) -> None:
+    token = register_and_login(client, "alice@example.com")
+    response = client.post(
+        "/api/v1/chat/messages",
+        headers=auth_headers(token),
+        json={"message": message},
+    )
+    assert response.status_code == 422
+
+
+def test_chat_poll_does_not_create_existing_conversation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = register_and_login(client, "alice@example.com")
+    headers = auth_headers(token)
+    assert client.get("/api/v1/chat", headers=headers).status_code == 200
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("existing conversation should be read without an upsert")
+
+    monkeypatch.setattr(
+        "app.infrastructure.persistence.repository.SqlAlchemyRepository.get_or_create_conversation",
+        unexpected,
+    )
+    assert client.get("/api/v1/chat", headers=headers).status_code == 200
 
 
 def test_project_lifecycle_and_owner_scoping(client: TestClient) -> None:
@@ -144,6 +183,25 @@ def test_run_creation_conflicts_and_ownership(client: TestClient) -> None:
     assert created.status_code == 202
     body = created.json()
     assert body["project_id"] == project["id"]
+    turn = client.get("/api/v1/chat", headers=auth_headers(alice)).json()["turns"][0]
+    assert turn["content"] == "build it"
+    assert turn["project_id"] == project["id"]
+    assert turn["run_id"] == body["run_id"]
+    other_project = client.post(
+        "/api/v1/projects",
+        headers=auth_headers(alice),
+        json={"title": "Other project", "summary": ""},
+    ).json()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute(
+            "UPDATE conversations SET selected_project_id=%s, context_version=context_version+1 "
+            "WHERE owner_id=(SELECT id FROM users WHERE email='alice@example.com')",
+            (other_project["id"],),
+        )
+        connection.commit()
+    older_turn = client.get("/api/v1/chat", headers=auth_headers(alice)).json()["turns"][0]
+    assert older_turn["project_id"] == project["id"]
+    assert older_turn["run_id"] == body["run_id"]
 
     duplicate = client.post(
         "/api/v1/runs",
@@ -225,6 +283,9 @@ def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     assert body["attempts_used"] == 0
     assert body["attempts_total"] == 5
     assert body["user_guidance"] == "make it bold"
+    turns = client.get("/api/v1/chat", headers=auth_headers(token)).json()["turns"]
+    assert [turn["content"] for turn in turns] == ["new", "make it bold"]
+    assert all(turn["run_id"] == run_id for turn in turns)
 
     with psycopg.connect(Settings().psycopg_url) as connection:
         connection.execute("UPDATE runs SET status='awaiting_user' WHERE id=%s", (run_id,))
@@ -232,6 +293,9 @@ def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     closed = client.post(f"/api/v1/runs/{run_id}/close", headers=auth_headers(token))
     assert closed.status_code == 200
     assert closed.json()["status"] == "failed"
+    turns = client.get("/api/v1/chat", headers=auth_headers(token)).json()["turns"]
+    assert turns[-1]["role"] == "assistant"
+    assert turns[-1]["run_id"] == run_id
 
 
 def test_delete_terminal_run(client: TestClient) -> None:
