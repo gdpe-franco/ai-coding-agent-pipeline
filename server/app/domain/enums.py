@@ -41,6 +41,11 @@ class ChatRequestStatus(StrEnum):
     FAILED = "failed"
 
 
+class ChatIntentAction(StrEnum):
+    CONTINUE_CURRENT = "continue_current"
+    REQUEST_SELECTION = "request_selection"
+
+
 class EventKind(StrEnum):
     PROJECT_RESOLVED = "project_resolved"
     PLANNER = "planner"

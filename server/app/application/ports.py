@@ -6,8 +6,15 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from app.domain.enums import ConversationSender, EventKind, RunStatus
-from app.domain.models import CheckReport, Feedback, Plan, ProjectContext, RunState
+from app.domain.enums import ChatIntentAction, ConversationSender, EventKind, RunStatus
+from app.domain.models import (
+    ChatIntentRequest,
+    CheckReport,
+    Feedback,
+    Plan,
+    ProjectContext,
+    RunState,
+)
 
 
 @dataclass(slots=True)
@@ -132,6 +139,31 @@ class RepositoryFactory(Protocol):
     def __call__(self) -> AbstractAsyncContextManager[RunRepository]: ...
 
 
+class ChatRequestRepository(Protocol):
+    async def heartbeat(self, worker_id: str, run_id: UUID | None) -> None: ...
+
+    async def claim_chat_request(
+        self, worker_id: str, stale_after_seconds: int
+    ) -> ChatIntentRequest | None: ...
+
+    async def heartbeat_chat_request(self, request_id: UUID, worker_id: str) -> None: ...
+
+    async def resolve_chat_request(
+        self,
+        request_id: UUID,
+        owner_id: UUID,
+        worker_id: str,
+        action: ChatIntentAction,
+        reason: str,
+        max_runs_per_project: int,
+        intent_error: bool = False,
+    ) -> None: ...
+
+
+class ChatRequestRepositoryFactory(Protocol):
+    def __call__(self) -> AbstractAsyncContextManager[ChatRequestRepository]: ...
+
+
 class RunQueue(Protocol):
     async def claim(self, worker_id: str, stale_after_seconds: int = 60) -> RunState | None: ...
 
@@ -173,6 +205,8 @@ class Clock(Protocol):
 
 
 __all__ = [
+    "ChatRequestRepository",
+    "ChatRequestRepositoryFactory",
     "Clock",
     "ConversationTurnContext",
     "EventSink",

@@ -4,13 +4,15 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.domain.enums import (
     ACTIVE_STATUSES,
+    ChatIntentAction,
     ChatRequestStatus,
     ConversationSender,
     EventKind,
@@ -18,7 +20,14 @@ from app.domain.enums import (
     RunStatus,
 )
 from app.domain.errors import InvalidTransitionError, RunConflictError
-from app.domain.models import ChatSelection, Feedback, Plan, ProjectContext, RunState
+from app.domain.models import (
+    ChatIntentRequest,
+    ChatSelection,
+    Feedback,
+    Plan,
+    ProjectContext,
+    RunState,
+)
 from app.domain.serialization import plan_payload
 from app.infrastructure.persistence.models import (
     Artifact,
@@ -105,7 +114,9 @@ class SqlAlchemyRepository:
             )
         ).scalar_one_or_none()
 
-    async def create_chat_request(self, owner_id: uuid.UUID, content: str) -> ConversationTurn:
+    async def create_chat_request(
+        self, owner_id: uuid.UUID, content: str, request_selection: bool = False
+    ) -> ConversationTurn:
         conversation = await self.get_or_create_conversation(owner_id)
         conversation = (
             await self.session.execute(
@@ -132,28 +143,262 @@ class SqlAlchemyRepository:
             raise RunConflictError("A chat request is already awaiting selection")
 
         snapshot = {
-            "selected_project_id": (
+            "project_id": (
                 str(conversation.selected_project_id) if conversation.selected_project_id else None
             ),
-            "active_feature_run_id": (
+            "feature_run_id": (
                 str(conversation.active_feature_run_id)
                 if conversation.active_feature_run_id
                 else None
             ),
+            "feature_mode": "continue" if conversation.selected_project_id else "new",
             "context_version": conversation.context_version,
         }
+        needs_selection = request_selection or conversation.selected_project_id is None
         return await self.add_conversation_turn(
             owner_id,
             content,
             ConversationSender.USER,
             project_id=conversation.selected_project_id,
             request_status=(
-                ChatRequestStatus.NEEDS_SELECTION
-                if conversation.selected_project_id is None
-                else None
+                ChatRequestStatus.NEEDS_SELECTION if needs_selection else ChatRequestStatus.RECEIVED
             ),
             context_snapshot=snapshot,
+            intent_result=(
+                {
+                    "action": "request_selection",
+                    "reason": "Choose the project or feature for this request.",
+                }
+                if needs_selection
+                else None
+            ),
         )
+
+    async def claim_chat_request(
+        self, worker_id: str, stale_after_seconds: int
+    ) -> ChatIntentRequest | None:
+        stale = ConversationTurn.heartbeat_at < (_now() - timedelta(seconds=stale_after_seconds))
+        turn = (
+            await self.session.execute(
+                select(ConversationTurn)
+                .where(
+                    or_(
+                        ConversationTurn.request_status == ChatRequestStatus.RECEIVED,
+                        (ConversationTurn.request_status == ChatRequestStatus.CLASSIFYING)
+                        & or_(ConversationTurn.heartbeat_at.is_(None), stale),
+                    )
+                )
+                .order_by(ConversationTurn.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if turn is None:
+            return None
+        turn.request_status = ChatRequestStatus.CLASSIFYING
+        turn.locked_by = worker_id
+        turn.heartbeat_at = _now()
+        await self.session.flush()
+
+        conversation = await self.session.get(Conversation, turn.conversation_id)
+        snapshot = turn.context_snapshot or {}
+        project_id = uuid.UUID(snapshot["project_id"]) if snapshot.get("project_id") else None
+        project = (
+            (
+                await self.session.execute(
+                    select(Project).where(
+                        Project.id == project_id, Project.owner_id == conversation.owner_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if project_id
+            else None
+        )
+        feature_run_id = (
+            uuid.UUID(snapshot["feature_run_id"]) if snapshot.get("feature_run_id") else None
+        )
+        feature_run = (
+            (
+                await self.session.execute(
+                    select(Run).where(
+                        Run.id == feature_run_id,
+                        Run.owner_id == conversation.owner_id,
+                        Run.project_id == project_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if feature_run_id and project
+            else None
+        )
+        recent = list(
+            (
+                await self.session.execute(
+                    select(ConversationTurn.role, ConversationTurn.content)
+                    .where(
+                        ConversationTurn.conversation_id == turn.conversation_id,
+                        ConversationTurn.sequence < turn.sequence,
+                    )
+                    .order_by(ConversationTurn.sequence.desc())
+                    .limit(10)
+                )
+            ).all()
+        )
+        await self.session.commit()
+        return ChatIntentRequest(
+            id=turn.id,
+            owner_id=conversation.owner_id,
+            message=turn.content,
+            context_version=snapshot.get("context_version", 0),
+            project_id=project_id if project else None,
+            active_feature_run_id=feature_run_id,
+            project_title=project.title if project else None,
+            feature_title=(
+                feature_run.message[:500]
+                if feature_run and feature_run.project_id == project_id
+                else None
+            ),
+            recent_turns=[
+                {"role": role.value, "content": content} for role, content in reversed(recent)
+            ],
+        )
+
+    async def heartbeat_chat_request(self, request_id: uuid.UUID, worker_id: str) -> None:
+        await self.session.execute(
+            update(ConversationTurn)
+            .where(
+                ConversationTurn.id == request_id,
+                ConversationTurn.request_status == ChatRequestStatus.CLASSIFYING,
+                ConversationTurn.locked_by == worker_id,
+            )
+            .values(heartbeat_at=func.now())
+        )
+        await self.session.commit()
+
+    async def resolve_chat_request(
+        self,
+        request_id: uuid.UUID,
+        owner_id: uuid.UUID,
+        worker_id: str,
+        action: ChatIntentAction,
+        reason: str,
+        max_runs_per_project: int,
+        intent_error: bool = False,
+    ) -> None:
+        locked = await self._lock_owned_turn(owner_id, request_id)
+        if locked is None:
+            return
+        conversation, turn = locked
+        if turn.request_status != ChatRequestStatus.CLASSIFYING or turn.locked_by != worker_id:
+            return
+
+        result = {"action": action.value, "reason": reason[:500]}
+        if intent_error:
+            result["tag"] = "intent_error"
+        turn.intent_result = result
+        if action == ChatIntentAction.REQUEST_SELECTION:
+            self._clear_chat_claim(turn, ChatRequestStatus.NEEDS_SELECTION)
+            await self.session.commit()
+            return
+
+        snapshot = turn.context_snapshot or {}
+        project_id = conversation.selected_project_id
+        if (
+            project_id is None
+            or snapshot.get("context_version") != conversation.context_version
+            or snapshot.get("project_id") != str(project_id)
+            or snapshot.get("feature_run_id")
+            != (
+                str(conversation.active_feature_run_id)
+                if conversation.active_feature_run_id
+                else None
+            )
+        ):
+            turn.intent_result = {
+                "action": ChatIntentAction.REQUEST_SELECTION.value,
+                "reason": "Your project context changed. Choose the project or feature for this request.",
+            }
+            self._clear_chat_claim(turn, ChatRequestStatus.NEEDS_SELECTION)
+            await self.session.commit()
+            return
+
+        project = await self.get_owned_project(project_id, conversation.owner_id)
+        if project is None:
+            turn.intent_result = {
+                "action": ChatIntentAction.REQUEST_SELECTION.value,
+                "reason": "The selected project is no longer available. Choose another project.",
+            }
+            self._clear_chat_claim(turn, ChatRequestStatus.NEEDS_SELECTION)
+            await self.session.commit()
+            return
+        if await self.active_run_for_project(project_id) is not None:
+            turn.intent_result = {
+                "action": ChatIntentAction.REQUEST_SELECTION.value,
+                "reason": "This project already has a run in progress. Choose another project or try again later.",
+            }
+            self._clear_chat_claim(turn, ChatRequestStatus.NEEDS_SELECTION)
+            await self.session.commit()
+            return
+        if await self.count_runs_for_project(project_id) >= max_runs_per_project:
+            turn.intent_result = {
+                "action": ChatIntentAction.REQUEST_SELECTION.value,
+                "reason": "This project has reached its run limit. Choose another project.",
+            }
+            self._clear_chat_claim(turn, ChatRequestStatus.NEEDS_SELECTION)
+            await self.session.commit()
+            return
+
+        previous = await self.latest_run_for_project(project_id)
+        run = Run(
+            owner_id=conversation.owner_id,
+            conversation_id=conversation.id,
+            project_id=project_id,
+            message=turn.content,
+            plan=previous.plan if previous else None,
+            latest_code=previous.latest_code if previous else None,
+            feedback=previous.feedback if previous else None,
+            checks=previous.checks if previous else None,
+        )
+        self.session.add(run)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            if not self._active_run_conflict(exc):
+                raise
+            await self.session.execute(
+                update(ConversationTurn)
+                .where(
+                    ConversationTurn.id == request_id,
+                    ConversationTurn.request_status == ChatRequestStatus.CLASSIFYING,
+                    ConversationTurn.locked_by == worker_id,
+                )
+                .values(
+                    request_status=ChatRequestStatus.NEEDS_SELECTION,
+                    intent_result={
+                        "action": ChatIntentAction.REQUEST_SELECTION.value,
+                        "reason": "Another run started for this project. Choose another project or try again later.",
+                    },
+                    locked_by=None,
+                    heartbeat_at=None,
+                )
+            )
+            await self.session.commit()
+            return
+        turn.project_id = project_id
+        turn.run_id = run.id
+        self._clear_chat_claim(turn, ChatRequestStatus.ENQUEUED)
+        await self.session.commit()
+
+    @staticmethod
+    def _clear_chat_claim(turn: ConversationTurn, status: ChatRequestStatus) -> None:
+        turn.request_status = status
+        turn.locked_by = None
+        turn.heartbeat_at = None
+
+    @staticmethod
+    def _active_run_conflict(error: IntegrityError) -> bool:
+        diagnostic = getattr(error.orig, "diag", None)
+        return getattr(diagnostic, "constraint_name", None) == "uq_runs_active_project"
 
     async def _lock_owned_turn(
         self, owner_id: uuid.UUID, turn_id: uuid.UUID
@@ -179,12 +424,16 @@ class SqlAlchemyRepository:
             return None
         return conversation, turn
 
-    async def confirm_new_project_request(
+    async def confirm_chat_selection(
         self,
         owner_id: uuid.UUID,
         turn_id: uuid.UUID,
         context_version: int,
-        title: str,
+        choice: str,
+        feature_mode: str,
+        max_runs_per_project: int,
+        project_id: uuid.UUID | None = None,
+        title: str | None = None,
     ) -> ChatSelection | None:
         locked = await self._lock_owned_turn(owner_id, turn_id)
         if locked is None:
@@ -208,26 +457,82 @@ class SqlAlchemyRepository:
         if context_version != conversation.context_version:
             raise InvalidTransitionError("The chat context changed; refresh the project menu")
 
-        project = Project(owner_id=owner_id, title=title, summary="")
-        self.session.add(project)
-        await self.session.flush()
+        if choice == "continue_current":
+            target_id = conversation.selected_project_id
+            if target_id is None:
+                raise InvalidTransitionError("There is no confirmed project to continue")
+            project = await self.get_owned_project(target_id, owner_id)
+        elif choice == "existing_project":
+            project = (
+                await self.get_owned_project(project_id, owner_id)
+                if project_id is not None
+                else None
+            )
+            if project is None:
+                return None
+            target_id = project.id
+        elif choice == "new_project" and title:
+            project = Project(owner_id=owner_id, title=title, summary="")
+            self.session.add(project)
+            await self.session.flush()
+            target_id = project.id
+        else:
+            raise InvalidTransitionError("The requested project selection is invalid")
+
+        if project is None:
+            return None
+        if await self.active_run_for_project(target_id) is not None:
+            raise RunConflictError("A run is already active for this project")
+        if await self.count_runs_for_project(target_id) >= max_runs_per_project:
+            raise RunConflictError("Project run cap reached")
+
+        previous = (
+            await self.latest_run_for_project(target_id) if feature_mode == "continue" else None
+        )
+        project_changed = conversation.selected_project_id != target_id
+        if feature_mode == "new":
+            feature_run_id = None
+        elif project_changed:
+            feature_run_id = previous.id if previous else None
+        else:
+            feature_run_id = conversation.active_feature_run_id
+
         run = Run(
             owner_id=owner_id,
             conversation_id=conversation.id,
-            project_id=project.id,
+            project_id=target_id,
             message=turn.content,
+            plan=previous.plan if previous else None,
+            latest_code=previous.latest_code if previous else None,
+            feedback=previous.feedback if previous else None,
+            checks=previous.checks if previous else None,
         )
         self.session.add(run)
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            if self._active_run_conflict(exc):
+                raise RunConflictError("A run is already active for this project") from exc
+            raise
 
-        turn.project_id = project.id
+        turn.project_id = target_id
         turn.run_id = run.id
         turn.request_status = ChatRequestStatus.ENQUEUED
-        conversation.selected_project_id = project.id
-        conversation.active_feature_run_id = run.id
-        conversation.context_version += 1
+        turn.intent_result = {"choice": choice, "feature_mode": feature_mode}
+        conversation.selected_project_id = target_id
+        conversation.active_feature_run_id = feature_run_id or run.id
+        context_changed = project_changed or conversation.active_feature_run_id != feature_run_id
+        if context_changed:
+            conversation.context_version += 1
+        turn.context_snapshot = {
+            "project_id": str(target_id),
+            "feature_run_id": str(conversation.active_feature_run_id),
+            "feature_mode": feature_mode,
+            "context_version": conversation.context_version,
+        }
         await self.session.commit()
-        return ChatSelection(run.id, project.id, conversation.context_version)
+        return ChatSelection(run.id, target_id, conversation.context_version)
 
     async def cancel_chat_request(self, owner_id: uuid.UUID, turn_id: uuid.UUID) -> bool:
         locked = await self._lock_owned_turn(owner_id, turn_id)
@@ -574,6 +879,7 @@ class SqlAlchemyRepository:
         *,
         request_status: ChatRequestStatus | None = None,
         context_snapshot: dict[str, Any] | None = None,
+        intent_result: dict[str, Any] | None = None,
     ) -> ConversationTurn:
         conversation = await self.get_or_create_conversation(owner_id)
         conversation = (
@@ -602,6 +908,7 @@ class SqlAlchemyRepository:
             sequence=sequence,
             request_status=request_status,
             context_snapshot=context_snapshot,
+            intent_result=intent_result,
         )
         self.session.add(turn)
         await self.session.flush()

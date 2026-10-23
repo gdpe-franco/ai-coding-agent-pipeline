@@ -111,6 +111,19 @@ class ChatSelection:
     context_version: int
 
 
+@dataclass(slots=True)
+class ChatIntentRequest:
+    id: UUID
+    owner_id: UUID
+    message: str
+    context_version: int
+    project_id: UUID | None
+    active_feature_run_id: UUID | None
+    project_title: str | None
+    feature_title: str | None
+    recent_turns: list[dict[str, str]]
+
+
 def validate_relative_path(path: str) -> str:
     if not path or path.startswith("/") or ".." in path or "\\" in path:
         raise ValueError("file path must be relative and must not contain '..'")
@@ -127,6 +140,8 @@ def validate_file_type(file_type: str) -> str:
 
 
 __all__ = [
+    "ChatIntentRequest",
+    "ChatSelection",
     "CheckReport",
     "Code",
     "ConversationSender",

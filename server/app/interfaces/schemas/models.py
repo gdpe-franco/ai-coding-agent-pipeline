@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from app.domain.enums import ChatRequestStatus
 
@@ -94,6 +94,7 @@ class PendingSelectionRead(BaseModel):
     turn_id: UUID
     context_version: int
     projects: list[ProjectOptionRead]
+    reason: str | None = None
 
 
 class ChatRead(BaseModel):
@@ -107,6 +108,7 @@ class ChatRead(BaseModel):
 
 class ChatMessageCreate(BaseModel):
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
+    request_selection: bool = False
 
 
 class ChatMessageCreated(BaseModel):
@@ -115,9 +117,29 @@ class ChatMessageCreated(BaseModel):
 
 class ChatSelectionCreate(BaseModel):
     context_version: int = Field(ge=0)
-    choice: Literal["new_project"]
-    feature_mode: Literal["new"]
-    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    choice: Literal["continue_current", "existing_project", "new_project"]
+    feature_mode: Literal["continue", "new"]
+    project_id: UUID | None = None
+    title: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def valid_choice(self) -> ChatSelectionCreate:
+        if self.choice == "continue_current":
+            valid = (
+                self.feature_mode == "continue" and self.project_id is None and self.title is None
+            )
+        elif self.choice == "existing_project":
+            valid = self.project_id is not None and self.title is None
+        else:
+            valid = (
+                self.feature_mode == "new" and self.project_id is None and self.title is not None
+            )
+        if not valid:
+            raise ValueError("selection fields do not match the chosen action")
+        return self
 
 
 class ChatSelectionCreated(BaseModel):

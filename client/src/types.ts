@@ -95,6 +95,24 @@ export interface PendingSelection {
   turn_id: string;
   context_version: number;
   projects: ProjectOption[];
+  reason: string | null;
+}
+
+export type ChatSelectionChoice = "continue_current" | "existing_project" | "new_project";
+export type FeatureMode = "continue" | "new";
+
+export interface ChatSelectionCreate {
+  context_version: number;
+  choice: ChatSelectionChoice;
+  feature_mode: FeatureMode;
+  project_id?: string;
+  title?: string;
+}
+
+export interface ChatSelectionCreated {
+  run_id: string;
+  project_id: string;
+  context_version: number;
 }
 
 export interface Chat {

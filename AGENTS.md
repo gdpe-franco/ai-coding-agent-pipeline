@@ -1,19 +1,13 @@
 # AGENTS.md
 
-## Repo state
+## Project memory
 
-- MVP implemented: `server/app/` (API, application, domain, infrastructure), `server/alembic/`, `server/tests/`, `server/evals/`, and a Vue/Vite SPA in `client/`. `shared/` remains reserved.
-- Shipped sources: `README.md`, `docs/architecture.md`, root Docker files, `server/`, `client/`. `tasks/` is gitignored scratch containing the PRD and approved briefs.
-- Docker Compose defines `db`, `app`, and `worker`; the runtime image includes Node for `node --check`. Both services share the `appdata` workspace volume.
-- The Azure provider path is implemented but unverified because deployment names and credentials are unavailable. Do not invent them.
+- Read `docs/architecture.md` (TDD) for stack, contracts, schema, and rationale. Keep contributor conventions here; update existing sections when decisions change. Link rather than duplicate architecture in README/PRD.
+- `tasks/` is ignored scratch for PRDs and briefs, not durable memory. The PRD owns user stories/acceptance criteria only. `shared/` is reserved.
+- Backend: `server/app/{domain,application,infrastructure,interfaces}`; tests: `server/tests/`; evals: `server/evals/`; SPA: `client/`. Entrypoints: `app.main:create_app()` and `app.worker`.
+- Azure is implemented but unverified; credentials/deployment names are unavailable. Never invent them. API budget policy remains undecided (TDD §13.2).
 
-## Read first
-
-- `docs/architecture.md` is the Technical Design Document and single source of truth for the stack, contracts, and rules. Do not restate them in `README.md` or the PRD; link to it. The PRD owns user stories/acceptance criteria only.
-- Backend layout is fixed: `server/app/{domain,application,infrastructure,interfaces}`; entrypoints are `app.main:create_app()` and `app.worker`. Adapter recipe: TDD §4.4 (`Adding an adapter`).
-- JavaScript syntax checks use `node --check`. The API budget policy is still undecided; confirm before choosing (TDD §13.2).
-
-## Commands
+## Commands and verification
 
 From repo root:
 
@@ -24,10 +18,9 @@ docker compose exec app alembic upgrade head
 curl -fsS http://localhost:8000/health
 ```
 
-Backend development:
+From `server/`:
 
 ```bash
-cd server
 pip install -e '.[dev]'
 alembic upgrade head
 uvicorn app.main:create_app --factory --reload
@@ -37,46 +30,37 @@ pytest
 python -m evals.runner
 ```
 
-- Run `ruff`, `pytest`, and `python -m evals.runner` from `server/`: the only config is `server/pyproject.toml` (line length 100, py314, `asyncio_mode=auto`, `testpaths=tests`). Put tests in `server/tests/`.
-- The worker and local verification need Node available for `node --check`. The runtime Docker image installs it. The evaluation harness lives in `server/evals/`; see TDD §11.2.
-- `packages = []` means installs provide dependencies only; run the app from `server/` so `app` is importable.
-- No CI, lockfile, or pre-commit hooks exist. The commands above are the verification gate.
-- Client: `npm ci && npm run dev` from `client/` (dev on 5173; FastAPI on 8000). Docker builds it in the Node stage and serves it through FastAPI.
+- Run backend checks from `server/`; `server/pyproject.toml` is the sole config (Python 3.14, line length 100, `asyncio_mode=auto`). `packages = []` installs dependencies only; the working directory makes `app` importable.
+- Ruff, pytest, and evals are the verification gate; no CI or pre-commit hooks exist. Skipped PostgreSQL tests do not satisfy it. Deterministic tests never call live models.
+- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, `app`, `worker`, with a shared `appdata` workspace volume; run migrations explicitly.
 
-## Architecture invariants
+## Code and tests
 
-- Imports flow `interfaces → application → domain`; `infrastructure` implements application ports and may import domain. Domain imports no FastAPI, SQLAlchemy, SDK, or I/O module. Application imports no infrastructure or interfaces.
-- Ports are narrow `typing.Protocol`s: `LLMClient`, `Workspace`, `RunRepository`, `RunQueue`, `EventSink`, `MemoryStore`, `RateLimiter`, `Clock`. Wire adapters only in `infrastructure/container.py` (manual DI, no mutable globals).
-- Domain models are plain dataclasses; Pydantic v2 validation lives at HTTP/model/checkpoint boundaries.
-- Never let API keys, URLs, or provider SDK types reach domain or application code. Infrastructure resolves credentials and injects ports; missing credentials fail with a masked error naming the setting.
-- Providers are OpenAI-compatible adapters under `infrastructure/llm/`. For Azure, the request `model` is the deployment name, not the underlying model name.
+- Apply Ponytail's smallest-complete-change principle even without its plugin/skills: reuse existing code or the standard library; add dependencies, abstractions, and configuration only for current requirements.
+- Use built-in generics, `X | None`, `StrEnum`, and typed boundaries. Ruff owns formatting/linting; avoid competing tooling.
+- Shared fixtures belong in `server/tests/conftest.py`; module-only fixtures stay local. Parametrize matching setup/assertion shapes; avoid giant scenario tests and helpers that hide behavior. No explicit `@pytest.mark.asyncio` is needed.
+- Test application policy with fake ports and persistence/API behavior with PostgreSQL. Assert observable outcomes, ownership, and failure preservation—not implementation details (TDD §11.1).
 
-## Workflow invariants
+## Architecture boundaries
 
-- LangGraph order: planner → coder → reviewer. `MAX_CODER_ATTEMPTS=3` means at most three Coder generations per round; increment counters once per Coder invocation before checks.
-- A round is unattended: no clarification pause and no human input until `completed` or `awaiting_user`. The third rejection or a valid `escalate` yields `awaiting_user`, never false approval: persist latest files, issues, round, and both counts.
-- Resume with guidance keeps the same run and project, increments `round`, resets `attempts_used` only, and starts a new graph thread at the Planner so the whole planner → coder → reviewer flow reruns. Close marks it `failed`.
-- One private conversation belongs to each user; every route scopes it through the authenticated owner. A project is context linked to the chat, never the owner of a separate conversation.
-- Pre-run intent detection may request manual selection but never chooses or creates a project. Only user confirmation may change chat context or authorize project creation; no selection actions are exposed until their story is implemented.
-- Model/schema errors go through `run_end` to `failed`; no model-error retry. `chat_reply` is written by the application layer, not a graph node. Validate the whole state before each checkpoint.
-- Reviewer runs deterministic checks before LLM review: every planned file exists, is nonempty, has an allowed type, then every `*.js` passes `node --check`. Approval requires both check stages. Never regex-parse model output; use JSON Schema plus Pydantic.
+- Dependencies point inward: interfaces → application → domain; infrastructure implements application ports. Application imports no infrastructure/interfaces; domain imports no frameworks, SDKs, or I/O.
+- Use narrow `typing.Protocol` ports and manual adapter wiring in `infrastructure/container.py`; no mutable globals. Domain models are dataclasses; Pydantic v2 validates HTTP/model/checkpoint boundaries. Adapter recipe: TDD §4.4.
+- Credentials, provider URLs, and SDK types stay in infrastructure. Missing credentials produce masked setting-specific errors. Providers are OpenAI-compatible; Azure `model` means deployment name. Provider/model/credential configuration is developer-only; no user settings or model-listing endpoints.
 
-## Persistence and files
+## Workflow guardrails
 
-- PostgreSQL 17 only. `alembic upgrade head` creates application tables, never `create_all`. Fixed value sets are native PG ENUMs mirrored as `str` enums.
-- Before production, keep one canonical initial migration and reset local databases when it changes. Once production data exists, freeze it and use additive, data-preserving migrations.
-- LangGraph checkpoints use `AsyncPostgresSaver`, which owns its tables and Psycopg 3 lifecycle via `setup()`. Do not pass the SQLAlchemy `postgresql+asyncpg` URL to it.
-- Workspace layout: latest `data/projects/{project_id}/`, approved snapshots `data/artifacts/{id}/`, served preview `data/preview/{project_id}/`, archive `data/archived/{project_id}/{run_id}/`. Writes are atomic (temp file + `os.replace`) and restricted to current plan paths.
-- Coder emits complete files, never patches. Non-plan files stay byte-for-byte unchanged.
-- Preview serves copied static files at `/preview/{preview_id}/` from a separate origin, using the unguessable `projects.preview_id` capability URL; the iframe has no top-navigation and the server never executes generated JS.
+- One owner-scoped private chat per user; projects are chat context, not separate conversations. Intent detection may request selection but never chooses/creates a project. Only explicit user confirmation changes context or authorizes creation.
+- Keep request routing (`conversation_turns.request_status`) separate from coding execution (`runs.status`). Snapshots/version prevent stale context; `intent_result` explains routing; locks/heartbeats enable recovery. Do not add overlapping flags/statuses (TDD §5.5, §8.1).
+- Detector errors preserve context and open `needs_selection` with `intent_error`. Request `failed` is reserved for failures that cannot provide a usable menu. Coding-run model/schema errors go through `run_end` to `failed`, without model-error retry.
+- Graph order: planner → coder → reviewer. At most three Coder generations per round; increment attempts once per invocation before checks. No human input mid-round. Third rejection or valid `escalate` yields `awaiting_user`, preserving files, issues, round, and both counts.
+- Resume keeps run/project, increments `round`, resets only `attempts_used`, and starts a new graph thread at Planner. Close marks `failed`. Run statuses: `pending`, `running`, `awaiting_user`, `completed`, `failed`; never `paused`/`exhausted`.
+- Reviewer checks planned files exist, are nonempty/allowlisted, then runs `node --check` on generated JS before LLM review. Approval requires both stages. Use JSON Schema + Pydantic, never regex parsing; validate whole checkpoint state. Application writes `chat_reply`, not graph nodes.
 
-## Config and docs gotchas
+## Persistence, security, and docs
 
-- `.env` is gitignored; `.env.example` holds placeholders only. Never commit populated secrets. Env names are listed in TDD §9.3; do not invent Azure deployment names while they are unset.
-- Provider, deployment, model, and credential settings are developer-only environment configuration. Do not add user-facing settings, credential, or model-listing endpoints.
-- Run statuses are `pending`, `running`, `awaiting_user`, `completed`, `failed`. Do not reintroduce `paused` or `exhausted`.
-- Rate limiting is PostgreSQL-backed and shared across API workers. Trust forwarded client IP headers only from `TRUSTED_PROXY_CIDRS`; never trust them unconditionally.
-- `Dockerfile` builds `client/` in a Node stage and serves the static output through FastAPI. The runtime image must include Node for `node --check`. Docker Compose services run migrations explicitly with `alembic upgrade head`.
-- PlantUML fences are `puml`. Diagrams that would need Graphviz start with `!pragma layout smetana` inside `@startuml`.
-- Do not recreate `docs/plantuml.md` or add tracking/milestone docs; `.vscode/settings.json` is gitignored.
-- Do not reintroduce decision/requirement IDs into the TDD; it is a design document, not a decision log.
+- PostgreSQL 17; Alembic creates app tables, never `create_all`. Fixed value sets use native PG ENUMs mirrored by `StrEnum`. Before production, keep one canonical initial migration and reset local DBs when it changes; afterward use additive, data-preserving migrations.
+- LangGraph owns its checkpoint/store tables and Psycopg 3 lifecycle via `setup()`; never pass the SQLAlchemy `postgresql+asyncpg` URL to its saver.
+- Workspace: latest `data/projects/{project_id}/`, snapshots `data/artifacts/{id}/`, preview `data/preview/{project_id}/`, archive `data/archived/{project_id}/{run_id}/`. Writes use temp file + `os.replace`, restricted to plan paths. Coder emits complete files; non-plan files remain byte-for-byte unchanged.
+- Preview serves copied static files on a separate origin at `/preview/{preview_id}/`, using an unguessable capability. No iframe top-navigation or server execution of generated JS. Rate limiting is PostgreSQL-backed; trust forwarded IPs only from `TRUSTED_PROXY_CIDRS`.
+- `.env` is ignored; `.env.example` contains placeholders only. Never commit secrets; setting names are in TDD §9.3.
+- PlantUML fences use `puml`; Graphviz-dependent diagrams start with `!pragma layout smetana` inside `@startuml`. Do not recreate `docs/plantuml.md`, add tracking/milestone docs, or introduce decision/requirement IDs into the TDD. `.vscode/settings.json` is ignored.

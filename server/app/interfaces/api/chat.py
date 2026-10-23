@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.domain.errors import InvalidTransitionError, RunConflictError
 from app.infrastructure.persistence.models import User
@@ -25,11 +25,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 @router.post("/messages", response_model=ChatMessageCreated, status_code=status.HTTP_202_ACCEPTED)
 async def submit_message(
     payload: ChatMessageCreate,
+    request: Request,
     user: User = Depends(get_current_user),
     repo: SqlAlchemyRepository = Depends(get_repo),
 ) -> ChatMessageCreated:
     try:
-        turn = await repo.create_chat_request(user.id, payload.message)
+        turn = await repo.create_chat_request(
+            user.id, payload.message, request_selection=payload.request_selection
+        )
     except RunConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await repo.session.commit()
@@ -41,17 +44,25 @@ async def submit_message(
     response_model=ChatSelectionCreated,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def confirm_new_project(
+async def confirm_selection(
     turn_id: UUID,
     payload: ChatSelectionCreate,
+    request: Request,
     user: User = Depends(get_current_user),
     repo: SqlAlchemyRepository = Depends(get_repo),
 ) -> ChatSelectionCreated:
     try:
-        selection = await repo.confirm_new_project_request(
-            user.id, turn_id, payload.context_version, payload.title
+        selection = await repo.confirm_chat_selection(
+            user.id,
+            turn_id,
+            payload.context_version,
+            payload.choice,
+            payload.feature_mode,
+            request.app.state.container.settings.max_runs_per_project,
+            project_id=payload.project_id,
+            title=payload.title,
         )
-    except InvalidTransitionError as exc:
+    except (InvalidTransitionError, RunConflictError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if selection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -94,6 +105,7 @@ async def get_chat(
         pending_selection = PendingSelectionRead(
             turn_id=pending_turn.id,
             context_version=conversation.context_version,
+            reason=(pending_turn.intent_result or {}).get("reason"),
             projects=[
                 ProjectOptionRead(id=project.id, title=project.title) for project in projects
             ],

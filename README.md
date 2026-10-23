@@ -3,8 +3,8 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** MVP in progress. Private accounts, persistent chat, and confirmed new-project creation from chat
-> are implemented. Existing-project/feature selection and provider verification remain follow-on work.
+> **Status:** MVP in progress. Private accounts, persistent chat, pre-run intent detection, and confirmed
+> project/feature selection from chat are implemented. Provider verification remains follow-on work.
 
 ## How it works
 
@@ -31,9 +31,9 @@ preview --> files : copied static files
 ```
 
 After login, the user lands in one persistent private chat; it restores the user's ordered conversation history
-and is the only item in the main navigation. A separate worker claims coding runs from PostgreSQL and executes
-the LangGraph workflow (planner → coder → reviewer). Chat messages are saved in that transcript; project and
-feature selection actions are added by the follow-on chat stories.
+and is the only item in the main navigation. A worker classifies persisted chat requests before claiming coding
+runs and executing the LangGraph workflow (planner → coder → reviewer). Project and feature targets are always
+confirmed by the user in that same transcript.
 
 The [technical design document](docs/architecture.md) is the source of truth for the stack, contracts, security
 rules, schema, trade-offs, and the presentation guide. The PRD, in the ignored `tasks/` directory, owns user

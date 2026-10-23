@@ -20,6 +20,11 @@ class ResolverResponse(StrictModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class IntentResponse(StrictModel):
+    action: Literal["continue_current", "request_selection"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class PlannerStep(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     file_path: str = Field(min_length=1, max_length=300)
@@ -59,6 +64,7 @@ class ReviewerResponse(StrictModel):
 
 
 RESOLVER_SCHEMA = ResolverResponse.model_json_schema()
+INTENT_SCHEMA = IntentResponse.model_json_schema()
 PLANNER_SCHEMA = PlannerResponse.model_json_schema()
 CODER_SCHEMA = CoderResponse.model_json_schema()
 REVIEWER_SCHEMA = ReviewerResponse.model_json_schema()

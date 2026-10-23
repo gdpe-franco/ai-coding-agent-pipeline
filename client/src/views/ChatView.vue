@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import { request } from "../api";
-import type { Chat, ConversationTurn } from "../types";
+import type {
+  Chat,
+  ChatSelectionCreate,
+  ChatSelectionCreated,
+  ChatSelectionChoice,
+  ConversationTurn,
+  FeatureMode,
+} from "../types";
 
 const chat = ref<Chat | null>(null);
 const draft = ref("");
 const projectTitle = ref("");
 const startingNewProject = ref(false);
+const requestSelection = ref(false);
 const sending = ref(false);
 const selectionBusy = ref(false);
 const error = ref("");
@@ -20,16 +28,20 @@ function refresh(force = false): Promise<void> {
   const pending = (async () => {
     try {
       const lastSequence = chat.value?.turns.at(-1)?.sequence;
-      const cursor = lastSequence === undefined ? "" : `?after=${lastSequence}`;
+      const isClassifying = chat.value?.turns.some(
+        (turn) => turn.request_status === "received" || turn.request_status === "classifying",
+      );
+      const cursor = lastSequence === undefined || isClassifying ? "" : `?after=${lastSequence}`;
       const latest = await request<Chat>(`/chat${cursor}`);
       if (!chat.value) {
         chat.value = latest;
       } else {
         const knownTurns = new Set(chat.value.turns.map((turn) => turn.id));
+        const updatedTurns = new Map(latest.turns.map((turn) => [turn.id, turn]));
         chat.value = {
           ...latest,
           turns: [
-            ...chat.value.turns,
+            ...chat.value.turns.map((turn) => updatedTurns.get(turn.id) ?? turn),
             ...latest.turns.filter((turn) => !knownTurns.has(turn.id)),
           ],
         };
@@ -54,9 +66,10 @@ async function send() {
   try {
     await request<{ turn_id: string }>("/chat/messages", {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, request_selection: requestSelection.value }),
     });
     draft.value = "";
+    requestSelection.value = false;
     await refresh(true);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "Could not send your message";
@@ -80,33 +93,51 @@ function startNewProject() {
 async function confirmNewProject() {
   const pending = chat.value?.pending_selection;
   const title = projectTitle.value.trim();
-  if (!pending || !startingNewProject.value || !title || selectionBusy.value) return;
+  if (!pending || !startingNewProject.value || !title) return;
+  await submitSelection({
+    context_version: pending.context_version,
+    choice: "new_project",
+    feature_mode: "new",
+    title,
+  });
+}
+
+async function chooseContext(
+  choice: ChatSelectionChoice,
+  featureMode: FeatureMode,
+  projectId?: string,
+) {
+  const pending = chat.value?.pending_selection;
+  if (!pending) return;
+  await submitSelection({
+    context_version: pending.context_version,
+    choice,
+    feature_mode: featureMode,
+    project_id: projectId,
+  });
+}
+
+async function submitSelection(selection: ChatSelectionCreate): Promise<void> {
+  const pending = chat.value?.pending_selection;
+  if (!pending || selectionBusy.value) return;
 
   selectionBusy.value = true;
   error.value = "";
   try {
-    const selection = await request<{ run_id: string; project_id: string }>(
+    const result = await request<ChatSelectionCreated>(
       `/chat/messages/${pending.turn_id}/selection`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          context_version: pending.context_version,
-          choice: "new_project",
-          feature_mode: "new",
-          title,
-        }),
-      },
+      { method: "POST", body: JSON.stringify(selection) },
     );
     applySelection(pending.turn_id, {
-      run_id: selection.run_id,
-      project_id: selection.project_id,
+      run_id: result.run_id,
+      project_id: result.project_id,
       request_status: "enqueued",
     });
     startingNewProject.value = false;
     projectTitle.value = "";
     await refresh(true);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "Could not create your project";
+    error.value = cause instanceof Error ? cause.message : "Could not confirm project selection";
   } finally {
     selectionBusy.value = false;
   }
@@ -157,6 +188,13 @@ onUnmounted(() => {
         :aria-label="turn.role === 'user' ? 'Your message' : `${turn.role} message`"
       >
         <p class="whitespace-pre-wrap text-sm leading-6">{{ turn.content }}</p>
+        <p
+          v-if="turn.request_status === 'received' || turn.request_status === 'classifying'"
+          class="mt-2 text-xs text-slate-400"
+          role="status"
+        >
+          Checking the current project and feature…
+        </p>
         <section
           v-if="chat?.pending_selection?.turn_id === turn.id"
           class="mt-4 space-y-3 border-t border-slate-700 pt-4"
@@ -164,14 +202,46 @@ onUnmounted(() => {
         >
           <div>
             <h2 class="text-sm font-semibold">Choose a project</h2>
-            <p class="mt-1 text-xs text-slate-400">This request needs a project. Create one to start it now.</p>
+            <p class="mt-1 text-xs text-slate-400">Confirm the project and feature before this request starts.</p>
           </div>
+          <p v-if="chat.pending_selection.reason" class="text-sm text-amber-200">
+            {{ chat.pending_selection.reason }}
+          </p>
+          <button
+            v-if="chat.selected_project_id"
+            class="btn-secondary"
+            type="button"
+            :disabled="selectionBusy"
+            @click="chooseContext('continue_current', 'continue')"
+          >
+            Continue current context
+          </button>
           <p v-if="chat.pending_selection.projects.length === 0" class="text-sm text-slate-400">
             You have no projects yet.
           </p>
-          <ul v-else class="space-y-1 text-sm text-slate-300" aria-label="Your projects">
+          <ul v-else class="space-y-3 text-sm text-slate-300" aria-label="Your projects">
             <li v-for="project in chat.pending_selection.projects" :key="project.id">
-              {{ project.title }}
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span>{{ project.title }}</span>
+                <div class="flex gap-2">
+                  <button
+                    class="btn-secondary"
+                    type="button"
+                    :disabled="selectionBusy"
+                    @click="chooseContext('existing_project', 'continue', project.id)"
+                  >
+                    Continue project
+                  </button>
+                  <button
+                    class="btn-secondary"
+                    type="button"
+                    :disabled="selectionBusy"
+                    @click="chooseContext('existing_project', 'new', project.id)"
+                  >
+                    New feature
+                  </button>
+                </div>
+              </div>
             </li>
           </ul>
           <button
@@ -231,6 +301,17 @@ onUnmounted(() => {
     </div>
     <form class="border-t border-slate-800 pt-4" @submit.prevent="send">
       <label for="chat-message" class="sr-only">Message</label>
+      <label
+        v-if="chat?.selected_project_id"
+        class="mb-3 flex items-center gap-2 text-sm text-slate-400"
+      >
+        <input
+          v-model="requestSelection"
+          type="checkbox"
+          :disabled="sending || selectionBusy || Boolean(chat?.pending_selection)"
+        />
+        Choose the project or feature for this request
+      </label>
       <div class="flex items-end gap-3">
         <textarea
           id="chat-message"

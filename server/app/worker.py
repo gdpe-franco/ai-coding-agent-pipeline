@@ -9,6 +9,7 @@ import uuid
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 
+from app.application.chat import ChatRequestProcessor
 from app.application.processor import RunProcessor
 from app.infrastructure.container import Container
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
@@ -35,7 +36,17 @@ async def run_worker(settings: Settings) -> None:
                     settings=settings,
                     worker_id=worker_id,
                 )
+                chat_processor = ChatRequestProcessor(
+                    repo_factory=container.repository_context,
+                    llm=container.llm_clients["planner"],
+                    worker_id=worker_id,
+                    heartbeat_seconds=settings.worker_heartbeat_seconds,
+                    stale_seconds=int(settings.worker_stale_seconds),
+                    max_runs_per_project=settings.max_runs_per_project,
+                )
                 while True:
+                    if await chat_processor.process_one():
+                        continue
                     async with container.session_factory() as session:
                         repo = SqlAlchemyRepository(session)
                         run = await repo.claim(
