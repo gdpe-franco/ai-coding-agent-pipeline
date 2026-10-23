@@ -63,6 +63,26 @@ stories and acceptance criteria.
    - API `http://localhost:8000/api/v1`
    - Preview `http://preview.localhost:8000`
 
+For public HTTPS access, point two Cloudflare Tunnel hostnames to the same local app port. Set
+`PUBLIC_URL=https://app.example.com`, `FRONTEND_ORIGIN=https://app.example.com`, and
+`PREVIEW_HOST=https://preview.example.com` in the ignored `.env`, then restart Compose. Configure the local
+`cloudflared` tunnel in `~/.cloudflared/config.yml`, with its own credentials file (outside this repository):
+
+```yaml
+tunnel: <TUNNEL_UUID>
+credentials-file: /path/to/<TUNNEL_UUID>.json
+ingress:
+  - hostname: app.example.com
+    service: http://localhost:8000
+  - hostname: preview.example.com
+    service: http://localhost:8000
+  - service: http_status:404
+```
+
+Route both hostnames to the named tunnel with `cloudflared tunnel route dns <TUNNEL_NAME> <HOSTNAME>`, then
+run `cloudflared tunnel run <TUNNEL_NAME>`. Cloudflare routes only the app/preview HTTP listener. The Compose
+database port mapping is for local development and must be removed on hosts reachable from untrusted networks.
+
 For manual development, start only PostgreSQL with `docker compose up -d db` and point the host-side
 `DATABASE_URL` at the published database port (`localhost:5432` by default). Then run from `server/`:
 

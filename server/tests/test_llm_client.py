@@ -7,7 +7,7 @@ import httpx
 import pytest
 from openai import BadRequestError
 
-from app.domain.errors import ModelError
+from app.domain.errors import MissingCredentialsError, ModelError
 from app.infrastructure.llm.client import (
     OpenAICompatibleClient,
     ProviderRegistry,
@@ -81,7 +81,7 @@ async def test_other_bad_requests_keep_temperature() -> None:
 def make_settings(**overrides: Any) -> Any:
     values = {
         "secret_key": "test-secret",
-        "azure_openai_api_key": "key",
+        "azure_openai_api_key": "super-secret-key",
         "azure_openai_endpoint": "https://example.test/openai/v1/",
         "azure_openai_deployment_planner": "planner-deployment",
         "azure_openai_deployment_coder": "coder-deployment",
@@ -110,10 +110,13 @@ def test_registry_uses_azure_deployments_per_role() -> None:
     ],
     ids=["api-key", "endpoint", "deployment"],
 )
-def test_registry_reports_missing_setting(
+async def test_registry_reports_missing_setting_without_exposing_credentials(
     overrides: dict[str, str], role: str, setting: str
 ) -> None:
     clients = ProviderRegistry(make_settings(**overrides)).build()
 
     assert isinstance(clients[role], UnavailableLLMClient)
     assert clients[role].setting == setting
+    with pytest.raises(MissingCredentialsError, match=setting) as error:
+        await clients[role].complete(role, [], SCHEMA)
+    assert "super-secret-key" not in str(error.value)
