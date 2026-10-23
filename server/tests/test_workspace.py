@@ -60,11 +60,21 @@ async def test_path_traversal_is_rejected(workspace: WebWorkspace, path: str) ->
 
 async def test_check_readable_reports_missing_empty_and_types(workspace: WebWorkspace) -> None:
     project_id = uuid4()
-    await workspace.write_file(project_id, "index.html", "<h1>x</h1>", {"index.html"})
-    report = await workspace.check_readable(project_id, ["index.html", "missing.css"])
+    paths = {"index.html", "missing.css", "empty.css", "bad.exe"}
+    await workspace.write_file(project_id, "index.html", "<h1>x</h1>", paths)
+    await workspace.write_file(project_id, "empty.css", "", paths)
+    await workspace.write_file(project_id, "bad.exe", "not allowed", paths)
+    report = await workspace.check_readable(
+        project_id, ["index.html", "missing.css", "empty.css", "bad.exe"]
+    )
+
     assert not report.ok
     assert report.files_checked == 1
-    assert any("missing planned file" in issue for issue in report.issues)
+    assert report.issues == [
+        "missing planned file: missing.css",
+        "empty planned file: empty.css",
+        "file type not allowed: bad.exe",
+    ]
 
 
 async def test_js_syntax_check_fails_when_node_is_absent(workspace: WebWorkspace) -> None:
