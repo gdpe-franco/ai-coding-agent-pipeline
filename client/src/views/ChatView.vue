@@ -133,7 +133,7 @@ onUnmounted(() => {
 
 <template>
   <section class="card mx-auto flex min-h-[75vh] max-w-4xl flex-col" aria-label="Project chat">
-    <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+    <header class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
       <div>
         <h1 class="text-xl font-semibold">{{ chat?.title ?? "Project chat" }}</h1>
       </div>
@@ -150,35 +150,35 @@ onUnmounted(() => {
     </header>
 
     <div class="flex-1 space-y-4 overflow-y-auto py-5" role="log" aria-live="polite">
-      <p v-if="loading" class="text-sm text-slate-400" role="status">Loading chat…</p>
-      <p v-else-if="messages.length === 0" class="text-sm text-slate-400">Start with a request for this project.</p>
+      <p v-if="loading" class="text-sm text-muted" role="status">Loading chat…</p>
+      <p v-else-if="messages.length === 0" class="text-sm text-muted">Start with a request for this project.</p>
       <article
         v-for="message in messages"
         :key="message.id"
-        class="max-w-3xl rounded-lg p-4"
-        :class="message.role === 'user' ? 'ml-auto bg-indigo-950/70' : 'bg-slate-900'"
+        class="rounded-xl border p-4 break-words"
+        :class="message.role === 'user' ? 'ml-auto w-fit max-w-[85%] border-line-strong bg-hover' : 'w-full max-w-3xl border-line bg-raised'"
         :aria-label="message.role === 'user' ? 'Your message' : 'Assistant message'"
       >
         <p class="whitespace-pre-wrap text-sm leading-6">{{ message.content }}</p>
         <div
           v-if="message.role === 'user' && message.run_id && latestRunMessageIds.get(message.run_id) === message.id"
-          class="mt-3 flex flex-wrap items-center gap-3 border-t border-slate-700 pt-3 text-xs"
+          class="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs"
         >
-          <span v-if="message.run_status" class="flex items-center gap-2 text-slate-400">
+          <span v-if="message.run_status" class="flex items-center gap-2 text-muted">
             <StatusBadge :status="message.run_status" />
             <span v-if="isActive(message.run_status)" class="inline-flex items-center gap-2" role="status">
-              <span class="h-2 w-2 animate-pulse rounded-full bg-indigo-300" aria-hidden="true" />
+              <span class="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
               {{ latestActivity(message.run_id) }}
             </span>
           </span>
-          <RouterLink class="text-indigo-300 hover:text-indigo-200" :to="`/runs/${message.run_id}`">
+          <RouterLink class="text-accent hover:text-accent-hover" :to="`/runs/${message.run_id}`">
             View details
           </RouterLink>
         </div>
       </article>
     </div>
 
-    <form class="border-t border-slate-800 pt-4" @submit.prevent="send">
+    <form class="border-t border-line pt-4" @submit.prevent="send">
       <label for="chat-message" class="sr-only">Message</label>
       <div class="flex items-end gap-3">
         <textarea
@@ -193,7 +193,7 @@ onUnmounted(() => {
           {{ sending ? "Sending…" : "Send" }}
         </button>
       </div>
-      <p v-if="error" class="mt-2 text-sm text-rose-300" role="alert">{{ error }}</p>
+      <p v-if="error" class="mt-2 text-sm text-danger" role="alert">{{ error }}</p>
     </form>
   </section>
 </template>

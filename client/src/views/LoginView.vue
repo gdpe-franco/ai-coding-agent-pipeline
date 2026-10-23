@@ -27,31 +27,40 @@ async function submit() {
 
 <template>
   <div class="mx-auto mt-16 max-w-md">
-    <div class="card space-y-5">
-      <div>
-        <h1 class="text-2xl font-semibold">AI Coding Agent Pipeline</h1>
-        <p class="mt-1 text-sm text-slate-400">
+    <div class="card space-y-6 p-6">
+      <div class="space-y-2">
+        <p class="mono-label">AI coding workspace</p>
+        <h1 class="text-3xl font-semibold">Plan, build, review.</h1>
+        <p class="text-sm leading-6 text-muted">
           Describe a static web app; the planner, coder, and reviewer do the rest.
         </p>
       </div>
       <div class="flex gap-2">
-        <button class="btn-secondary flex-1" :class="mode === 'login' ? 'border-indigo-400' : ''" @click="mode = 'login'">
+        <button
+          class="btn-secondary flex-1"
+          :class="mode === 'login' ? 'border-accent bg-raised text-paper' : ''"
+          @click="mode = 'login'"
+        >
           Sign in
         </button>
-        <button class="btn-secondary flex-1" :class="mode === 'register' ? 'border-indigo-400' : ''" @click="mode = 'register'">
+        <button
+          class="btn-secondary flex-1"
+          :class="mode === 'register' ? 'border-accent bg-raised text-paper' : ''"
+          @click="mode = 'register'"
+        >
           Register
         </button>
       </div>
       <form class="space-y-3" @submit.prevent="submit">
         <label class="block text-sm">
-          <span class="mb-1 block text-slate-400">Email</span>
+          <span class="mb-1 block text-muted">Email</span>
           <input v-model="email" class="input" type="email" autocomplete="email" required />
         </label>
         <label class="block text-sm">
-          <span class="mb-1 block text-slate-400">Password</span>
+          <span class="mb-1 block text-muted">Password</span>
           <input v-model="password" class="input" type="password" minlength="8" autocomplete="current-password" required />
         </label>
-        <p v-if="localError" class="text-sm text-rose-300">{{ localError }}</p>
+        <p v-if="localError" class="text-sm text-danger">{{ localError }}</p>
         <button class="btn w-full" type="submit" :disabled="auth.loading">
           {{ mode === "login" ? "Sign in" : "Create account" }}
         </button>

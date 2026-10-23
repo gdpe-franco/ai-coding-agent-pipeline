@@ -24,7 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="AI Coding Agent Pipeline", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="AI Coding Multi-Agent Pipeline", version="0.1.0", lifespan=lifespan)
     app.state.container = container
 
     app.add_middleware(

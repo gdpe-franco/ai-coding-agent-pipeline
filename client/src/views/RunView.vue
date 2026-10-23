@@ -118,7 +118,7 @@ onUnmounted(() => window.clearInterval(timer));
 </script>
 
 <template>
-  <div v-if="error" class="card flex items-center justify-between gap-3 border-rose-800 text-rose-200">
+  <div v-if="error" class="card flex items-center justify-between gap-3 border-danger-line bg-danger-soft text-danger">
     <span>{{ error }}</span>
     <button class="btn-secondary" type="button" @click="load">Retry loading</button>
   </div>
@@ -126,23 +126,23 @@ onUnmounted(() => window.clearInterval(timer));
   <div v-if="run" class="space-y-6">
     <header class="card flex flex-wrap items-start justify-between gap-4">
       <div>
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-3">
           <h1 class="text-2xl font-semibold">Run</h1>
           <StatusBadge :status="run.status" />
         </div>
-        <p class="mt-2 max-w-3xl whitespace-pre-wrap text-sm text-slate-300">{{ run.message }}</p>
-        <p class="mt-2 text-xs text-slate-500">{{ new Date(run.created_at).toLocaleString() }}</p>
+        <p class="mt-2 max-w-3xl whitespace-pre-wrap text-sm text-paper-dim">{{ run.message }}</p>
+        <p class="mt-2 text-xs text-faint">{{ new Date(run.created_at).toLocaleString() }}</p>
       </div>
       <div class="flex gap-2">
         <RouterLink class="btn-secondary" :to="`/chats/${run.chat_id}/history`">Run history</RouterLink>
       </div>
     </header>
 
-    <div v-if="run.status === 'awaiting_user'" class="card border-amber-700/60 bg-amber-950/20 space-y-3">
-        <h2 class="text-lg font-semibold text-amber-200">This request needs your guidance</h2>
-        <p class="text-sm text-amber-100/80">
-          The saved files and open questions are shown below. Add guidance to continue this request, or close
-          it. This result is not approved.
+    <div v-if="run.status === 'awaiting_user'" class="card space-y-3 border-warning-line bg-warning-soft">
+      <h2 class="text-lg font-semibold text-warning">This request needs your guidance</h2>
+      <p class="text-sm text-paper-dim">
+        The saved files and open questions are shown below. Add guidance to continue this request, or close
+        it. This result is not approved.
       </p>
       <textarea v-model="guidance" class="input" rows="3" placeholder="What should change?" />
       <div class="flex gap-2">
@@ -151,35 +151,35 @@ onUnmounted(() => window.clearInterval(timer));
       </div>
     </div>
 
-    <div v-if="run.chat_reply" class="card text-sm text-slate-200">{{ run.chat_reply }}</div>
+    <div v-if="run.chat_reply" class="card text-sm text-paper-dim">{{ run.chat_reply }}</div>
 
     <div class="grid gap-6 lg:grid-cols-2">
       <section class="card space-y-3">
         <h2 class="text-lg font-semibold">Plan</h2>
-        <p v-if="run.plan" class="text-sm text-slate-300">{{ run.plan.summary }}</p>
+        <p v-if="run.plan" class="text-sm text-paper-dim">{{ run.plan.summary }}</p>
         <ol v-if="run.plan" class="space-y-2">
-          <li v-for="step in run.plan.steps" :key="step.id" class="rounded-lg border border-slate-800 p-3">
-            <p class="font-mono text-sm text-indigo-300">{{ step.file_path }}</p>
-            <p class="text-sm text-slate-300">{{ step.description }}</p>
+          <li v-for="step in run.plan.steps" :key="step.id" class="rounded-lg border border-line p-3">
+            <p class="font-mono text-sm text-accent">{{ step.file_path }}</p>
+            <p class="text-sm text-paper-dim">{{ step.description }}</p>
           </li>
         </ol>
-        <p v-else class="text-sm text-slate-500">No plan yet.</p>
+        <p v-else class="text-sm text-faint">No plan yet.</p>
       </section>
 
       <section class="card space-y-3">
         <h2 class="text-lg font-semibold">Deterministic checks</h2>
         <div v-if="run.checks" class="space-y-1 text-sm">
-          <p :class="run.checks.file_structure_ok ? 'text-emerald-300' : 'text-rose-300'">
+          <p :class="run.checks.file_structure_ok ? 'text-success' : 'text-danger'">
             File structure: {{ run.checks.file_structure_ok ? "pass" : "fail" }}
           </p>
-          <p :class="run.checks.js_syntax_ok ? 'text-emerald-300' : 'text-rose-300'">
+          <p :class="run.checks.js_syntax_ok ? 'text-success' : 'text-danger'">
             JavaScript syntax: {{ run.checks.js_syntax_ok ? "pass" : "fail" }}
           </p>
-          <ul v-if="run.checks.issues.length" class="list-disc pl-5 text-slate-300">
+          <ul v-if="run.checks.issues.length" class="list-disc pl-5 text-paper-dim">
             <li v-for="issue in run.checks.issues" :key="issue">{{ issue }}</li>
           </ul>
         </div>
-        <p v-else class="text-sm text-slate-500">Checks run before the reviewer.</p>
+        <p v-else class="text-sm text-faint">Checks run before the reviewer.</p>
       </section>
     </div>
 
@@ -187,24 +187,24 @@ onUnmounted(() => window.clearInterval(timer));
       <section class="card space-y-3">
         <h2 class="text-lg font-semibold">Review</h2>
         <div v-if="run.feedback" class="space-y-2 text-sm">
-          <p class="font-semibold" :class="run.feedback.verdict === 'approve' ? 'text-emerald-300' : 'text-amber-300'">
+          <p class="font-semibold" :class="run.feedback.verdict === 'approve' ? 'text-success' : 'text-warning'">
             {{ run.feedback.verdict }}
           </p>
-          <p class="text-slate-300">{{ run.feedback.summary }}</p>
-          <ul class="list-disc space-y-1 pl-5 text-slate-300">
+          <p class="text-paper-dim">{{ run.feedback.summary }}</p>
+          <ul class="list-disc space-y-1 pl-5 text-paper-dim">
             <li v-for="(issue, index) in run.feedback.issues" :key="index">
-              <span v-if="issue.file_path" class="font-mono text-xs text-indigo-300">{{ issue.file_path }}: </span>
+              <span v-if="issue.file_path" class="font-mono text-xs text-accent">{{ issue.file_path }}: </span>
               {{ issue.message }}
             </li>
           </ul>
         </div>
-        <p v-else class="text-sm text-slate-500">No review yet.</p>
+        <p v-else class="text-sm text-faint">No review yet.</p>
       </section>
     </div>
 
     <FileExplorer title="Files" :files="files" :load-file="loadFile">
       <template #actions>
-        <label v-if="artifactExecutions.length" class="flex items-center gap-2 text-xs text-slate-400">
+        <label v-if="artifactExecutions.length" class="flex items-center gap-2 text-xs text-muted">
           Saved execution
           <select v-model="selectedExecutionId" class="input w-auto py-1">
             <option value="">Current run output</option>

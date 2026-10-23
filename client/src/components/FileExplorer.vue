@@ -103,14 +103,14 @@ async function selectFile(path: string) {
       <h2 class="text-lg font-semibold">{{ title }}</h2>
       <slot name="actions" />
     </header>
-    <p v-if="files.length === 0" class="text-sm text-slate-400">No files yet.</p>
+    <p v-if="files.length === 0" class="text-sm text-muted">No files yet.</p>
     <div v-else class="grid min-h-64 gap-4 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.5fr)]">
-      <nav class="max-h-[32rem] overflow-auto border-r border-slate-800 pr-3" :aria-label="`${title} file tree`">
+      <nav class="max-h-[32rem] overflow-auto border-r border-line pr-3" :aria-label="`${title} file tree`">
         <ul class="space-y-1">
           <li v-for="{ branch, depth } in visibleBranches" :key="branch.path">
             <button
-              class="flex w-full items-center gap-2 truncate rounded px-2 py-1 text-left text-sm hover:bg-slate-800"
-              :class="selectedPath === branch.path ? 'bg-slate-800 text-indigo-200' : 'text-slate-300'"
+              class="flex w-full items-center gap-2 truncate rounded px-2 py-1 text-left text-sm hover:bg-hover"
+              :class="selectedPath === branch.path ? 'bg-hover text-accent-hover' : 'text-paper-dim'"
               :style="{ paddingLeft: `${0.5 + depth * 1}rem` }"
               :aria-label="`${branch.directory ? (expanded.has(branch.path) ? 'Collapse' : 'Expand') : 'Open'} ${branch.name}`"
               :aria-expanded="branch.directory ? expanded.has(branch.path) : undefined"
@@ -127,11 +127,11 @@ async function selectFile(path: string) {
         </ul>
       </nav>
       <div class="min-w-0">
-        <p v-if="selectedPath" class="mb-2 truncate font-mono text-xs text-slate-500">{{ selectedPath }}</p>
-        <p v-if="loading" role="status" class="text-sm text-slate-400">Opening file…</p>
-        <p v-else-if="error" role="alert" class="text-sm text-rose-300">{{ error }}</p>
-        <p v-else-if="!selectedPath" class="text-sm text-slate-500">Choose a file to inspect it.</p>
-        <pre v-else class="max-h-[32rem] overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-200"><code>{{ content }}</code></pre>
+        <p v-if="selectedPath" class="mb-2 truncate font-mono text-xs text-faint">{{ selectedPath }}</p>
+        <p v-if="loading" role="status" class="text-sm text-muted">Opening file…</p>
+        <p v-else-if="error" role="alert" class="text-sm text-danger">{{ error }}</p>
+        <p v-else-if="!selectedPath" class="text-sm text-faint">Choose a file to inspect it.</p>
+        <pre v-else class="max-h-[32rem] overflow-auto rounded-lg bg-ink p-3 text-xs text-paper-dim"><code>{{ content }}</code></pre>
       </div>
     </div>
   </section>

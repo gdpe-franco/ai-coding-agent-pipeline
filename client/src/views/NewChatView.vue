@@ -37,7 +37,7 @@ async function createChat() {
   <section class="card mx-auto max-w-3xl space-y-4">
     <div>
       <h1 class="text-xl font-semibold">Start a new project</h1>
-      <p class="mt-1 text-sm text-slate-400">Your first message creates a project and its chat.</p>
+      <p class="mt-1 text-sm text-muted">Your first message creates a project and its chat.</p>
     </div>
     <form class="space-y-3" @submit.prevent="createChat">
       <label for="new-chat-message" class="sr-only">Describe your project</label>
@@ -50,7 +50,7 @@ async function createChat() {
         required
         :disabled="submitting"
       />
-      <p v-if="error" role="alert" class="text-sm text-rose-300">{{ error }}</p>
+      <p v-if="error" role="alert" class="text-sm text-danger">{{ error }}</p>
       <div class="flex justify-end">
         <button class="btn" type="submit" :disabled="submitting || !message.trim()">
           {{ submitting ? "Starting…" : "Create project and start" }}

@@ -24,9 +24,10 @@ onMounted(async () => {
 
 <template>
   <section v-if="project" class="card mx-auto max-w-3xl space-y-4">
-    <div>
+    <div class="space-y-2">
+      <p class="mono-label">Project</p>
       <h1 class="text-2xl font-semibold">{{ project.title }}</h1>
-      <p class="mt-2 whitespace-pre-wrap text-sm text-slate-400">
+      <p class="mt-2 whitespace-pre-wrap text-sm text-muted">
         {{ project.summary || "Your project workspace." }}
       </p>
     </div>
@@ -39,8 +40,8 @@ onMounted(async () => {
     >
       Open approved preview ↗
     </a>
-    <p v-else class="text-sm text-slate-500">No approved preview yet.</p>
+    <p v-else class="text-sm text-faint">No approved preview yet.</p>
   </section>
-  <p v-else-if="error" role="alert" class="card text-rose-300">{{ error }}</p>
-  <p v-else class="text-sm text-slate-400" role="status">Loading project…</p>
+  <p v-else-if="error" role="alert" class="card text-danger">{{ error }}</p>
+  <p v-else class="text-sm text-muted" role="status">Loading project…</p>
 </template>
