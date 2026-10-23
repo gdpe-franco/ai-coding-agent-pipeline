@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from app.domain.enums import ChatRequestStatus
+from app.domain.enums import ChatRequestStatus, RunStatus
 
 
 class ProjectCreate(BaseModel):
@@ -81,6 +81,7 @@ class ConversationTurnRead(BaseModel):
     sequence: int
     project_id: UUID | None = None
     run_id: UUID | None = None
+    run_status: RunStatus | None = None
     request_status: ChatRequestStatus | None = None
     created_at: datetime
 

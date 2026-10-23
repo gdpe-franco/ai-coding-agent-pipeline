@@ -82,6 +82,7 @@ export interface ConversationTurn {
   sequence: number;
   project_id: string | null;
   run_id: string | null;
+  run_status: RunStatus | null;
   request_status: ChatRequestStatus | null;
   created_at: string;
 }

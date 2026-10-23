@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.application.processor import RunProcessor
-from app.domain.enums import ConversationSender, RunStatus
+from app.domain.enums import ConversationSender, EventKind, RunStatus
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from tests.conftest import create_test_user
 
@@ -100,6 +100,7 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         turns = await repo.list_conversation_turns(user.id)
         saved_run = await repo.get_run_model(run.id)
         conversation = await repo.get_conversation(user.id)
+        events = await repo.list_events(run.id)
     assert [(turn.role, turn.content) for turn in turns] == [
         (ConversationSender.USER, "request"),
         (ConversationSender.USER, "Current feature"),
@@ -111,6 +112,10 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
     assert conversation.selected_project_id == current_project.id
     assert conversation.active_feature_run_id == current_run.id
     assert conversation.context_version == 7
+    replies = [event for event in events if event.kind == EventKind.CHAT_REPLY]
+    assert len(replies) == 1
+    assert replies[0].payload["message"] == expected_reply
+    assert sum(event.kind == EventKind.RUN_END for event in events) == 1
 
 
 async def test_failure_is_saved_as_assistant_turn(processor_context) -> None:
@@ -125,9 +130,13 @@ async def test_failure_is_saved_as_assistant_turn(processor_context) -> None:
         repo = SqlAlchemyRepository(session)
         turns = await repo.list_conversation_turns(user.id)
         saved_run = await repo.get_run_model(run.id)
+        events = await repo.list_events(run.id)
     assert [(turn.role, turn.content) for turn in turns] == [
         (ConversationSender.USER, "request"),
         (ConversationSender.ASSISTANT, "RuntimeError: provider unavailable"),
     ]
     assert [turn.run_id for turn in turns] == [run.id, run.id]
     assert saved_run.status == RunStatus.FAILED
+    assert [event.kind for event in events].count(EventKind.ERROR) == 1
+    assert [event.kind for event in events].count(EventKind.CHAT_REPLY) == 1
+    assert [event.kind for event in events].count(EventKind.RUN_END) == 1

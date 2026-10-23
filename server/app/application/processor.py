@@ -130,9 +130,7 @@ class RunProcessor:
                     checks=result.get("checks"),
                     error=None,
                 )
-                await repo.add_conversation_turn(
-                    run.owner_id, reply, ConversationSender.ASSISTANT, run_id, project_id
-                )
+                await self._record_chat_reply(repo, run, reply, project_id)
             elif handoff:
                 reply = f"This run needs your guidance. {summary}"
                 await repo.update_run(
@@ -155,9 +153,7 @@ class RunProcessor:
                         "attempts_total": result.get("attempts_total", 0),
                     },
                 )
-                await repo.add_conversation_turn(
-                    run.owner_id, reply, ConversationSender.ASSISTANT, run_id, project_id
-                )
+                await self._record_chat_reply(repo, run, reply, project_id)
             else:
                 await self._mark_failed(
                     repo,
@@ -196,6 +192,14 @@ class RunProcessor:
             )
             await repo.commit()
 
+    async def _record_chat_reply(
+        self, repo, run: RunState, message: str, project_id: UUID | None
+    ) -> None:
+        await repo.append_event(run.id, EventKind.CHAT_REPLY, {"message": message})
+        await repo.add_conversation_turn(
+            run.owner_id, message, ConversationSender.ASSISTANT, run.id, project_id
+        )
+
     async def _mark_failed(
         self, repo, run: RunState, message: str, tag: str = "internal_error"
     ) -> None:
@@ -203,16 +207,10 @@ class RunProcessor:
             run.id, status=RunStatus.FAILED, error=message[:2000], chat_reply=message[:2000]
         )
         await repo.append_event(run.id, EventKind.ERROR, {"tag": tag, "message": message[:2000]})
-        await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
         if run.project_id:
             await repo.associate_unassigned_turns_with_project(run.id, run.project_id)
-        await repo.add_conversation_turn(
-            run.owner_id,
-            message[:2000],
-            ConversationSender.ASSISTANT,
-            run.id,
-            run.project_id,
-        )
+        await self._record_chat_reply(repo, run, message[:2000], run.project_id)
+        await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
         if run.project_id:
             project = await repo.get_project_context(run.project_id)
             await self.memory.save_round(

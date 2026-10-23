@@ -110,6 +110,9 @@ async def get_chat(
                 ProjectOptionRead(id=project.id, title=project.title) for project in projects
             ],
         )
+    run_statuses = await repo.run_statuses(
+        user.id, {turn.run_id for turn in turns if turn.run_id is not None}
+    )
     return ChatRead(
         conversation_id=conversation.id,
         context_version=conversation.context_version,
@@ -124,6 +127,7 @@ async def get_chat(
                 sequence=turn.sequence,
                 project_id=turn.project_id,
                 run_id=turn.run_id,
+                run_status=run_statuses.get(turn.run_id) if turn.run_id is not None else None,
                 request_status=turn.request_status,
                 created_at=turn.created_at,
             )

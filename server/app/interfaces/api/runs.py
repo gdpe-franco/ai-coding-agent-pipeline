@@ -234,6 +234,7 @@ async def close_run(
     run.locked_at = None
     run.heartbeat_at = None
     await repo.append_event(run.id, EventKind.ABANDONMENT, {"message": message})
+    await repo.append_event(run.id, EventKind.CHAT_REPLY, {"message": message})
     await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
     await repo.add_conversation_turn(
         run.owner_id, message, ConversationSender.ASSISTANT, run.id, run.project_id

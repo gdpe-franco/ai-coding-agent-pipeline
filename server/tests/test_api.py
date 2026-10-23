@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -174,8 +175,29 @@ def test_confirming_new_project_links_original_request_once(client: TestClient) 
     assert turn["content"] == run["message"] == "build a new app"
     assert turn["project_id"] == run["project_id"] == result["project_id"]
     assert turn["run_id"] == result["run_id"]
+    assert turn["run_status"] == "pending"
     assert turn["request_status"] == "enqueued"
     assert run["status"] == "pending"
+
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE runs SET status='running' WHERE id=%s", (result["run_id"],))
+        connection.commit()
+    running_turn = next(
+        turn
+        for turn in client.get("/api/v1/chat", headers=headers).json()["turns"]
+        if turn["id"] == turn_id
+    )
+    assert running_turn["run_status"] == "running"
+
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE runs SET status='completed' WHERE id=%s", (result["run_id"],))
+        connection.commit()
+    completed_turn = next(
+        turn
+        for turn in client.get("/api/v1/chat", headers=headers).json()["turns"]
+        if turn["id"] == turn_id
+    )
+    assert completed_turn["run_status"] == "completed"
     with psycopg.connect(Settings().psycopg_url) as connection:
         run_conversation_id = connection.execute(
             "SELECT conversation_id FROM runs WHERE id=%s", (result["run_id"],)
@@ -426,6 +448,53 @@ def test_projectless_run_conflict(client: TestClient) -> None:
     assert second.status_code == 409
 
 
+def test_run_events_are_ordered_and_trace_is_owner_scoped(client: TestClient) -> None:
+    alice = register_and_login(client, "alice@example.com")
+    bob = register_and_login(client, "bob@example.com")
+    headers = auth_headers(alice)
+    run = client.post("/api/v1/runs", headers=headers, json={"message": "build"}).json()
+    run_id = run["run_id"]
+    first_time = datetime(2026, 1, 1, tzinfo=UTC)
+    second_time = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
+    graph_run_id = uuid4()
+
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute(
+            "INSERT INTO events (id, run_id, kind, payload, created_at)"
+            " VALUES (%s,%s,'coder',%s::jsonb,%s)",
+            (str(uuid4()), run_id, json.dumps({"attempt": 1}), second_time),
+        )
+        connection.execute(
+            "INSERT INTO events (id, run_id, kind, payload, created_at)"
+            " VALUES (%s,%s,'planner',%s::jsonb,%s)",
+            (str(uuid4()), run_id, json.dumps({"summary": "plan"}), first_time),
+        )
+        connection.execute(
+            "INSERT INTO graph_runs (id, run_id, round, thread_id, created_at)"
+            " VALUES (%s,%s,1,'thread-1',%s)",
+            (str(graph_run_id), run_id, first_time),
+        )
+        connection.execute(
+            "INSERT INTO graph_events (id, graph_run_id, node, payload, created_at)"
+            " VALUES (%s,%s,'planner',%s::jsonb,%s)",
+            (str(uuid4()), str(graph_run_id), json.dumps({"summary": "plan"}), first_time),
+        )
+        connection.commit()
+
+    events = client.get(f"/api/v1/runs/{run_id}/events", headers=headers)
+    assert [event["kind"] for event in events.json()] == ["planner", "coder"]
+    after_first = client.get(
+        f"/api/v1/runs/{run_id}/events",
+        headers=headers,
+        params={"after": first_time.isoformat()},
+    )
+    assert [event["kind"] for event in after_first.json()] == ["coder"]
+    trace = client.get(f"/api/v1/runs/{run_id}/trace", headers=headers)
+    assert trace.json()["rounds"][0]["events"][0]["node"] == "planner"
+    assert client.get(f"/api/v1/runs/{run_id}/events", headers=auth_headers(bob)).status_code == 404
+    assert client.get(f"/api/v1/runs/{run_id}/trace", headers=auth_headers(bob)).status_code == 404
+
+
 def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     token = register_and_login(client, "alice@example.com")
     run = client.post("/api/v1/runs", headers=auth_headers(token), json={"message": "new"}).json()
@@ -474,6 +543,12 @@ def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     turns = client.get("/api/v1/chat", headers=auth_headers(token)).json()["turns"]
     assert turns[-1]["role"] == "assistant"
     assert turns[-1]["run_id"] == run_id
+    assert turns[0]["run_status"] == "failed"
+    kinds = [
+        event["kind"]
+        for event in client.get(f"/api/v1/runs/{run_id}/events", headers=auth_headers(token)).json()
+    ]
+    assert "chat_reply" in kinds
 
 
 def test_delete_terminal_run(client: TestClient) -> None:

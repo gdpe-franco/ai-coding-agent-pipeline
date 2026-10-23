@@ -417,7 +417,7 @@ the handoff for an explicit resume; a context switch does not resume it.
 | `Feedback` | `verdict`, `summary`, `issues`, optional `suggested_code`, timestamp. |
 | `CheckReport` | `file_structure_ok`, `js_syntax_ok`, `files_checked`, `syntax_checked`, `issues`. |
 | `Conversation` | UUID `id`, unique `owner_id`, nullable `selected_project_id`, nullable `active_feature_run_id`, monotonic `context_version`, timestamps. One per user; selected references must belong to that user and the feature run must belong to the selected project. |
-| `ConversationTurn` | UUID `id`, `conversation_id`, ordered `sequence`, sender, content, nullable `project_id`/`run_id`, and timestamps. User requests additionally persist routing status, context snapshot/version, and validated intent result. |
+| `ConversationTurn` | UUID `id`, `conversation_id`, ordered `sequence`, sender, content, nullable `project_id`/`run_id`, and timestamps. User requests additionally persist routing status, context snapshot/version, and validated intent result; chat responses include the linked run's current status. |
 | `RunState` | `id`, `owner_id`, non-null confirmed `project_id`, `conversation_id`, `message`, `status`, plan, latest code, feedback, checks, `attempts_used`, `attempts_total`, `round`, latest `user_guidance`, events, trace, terminal `chat_reply`, timestamps. `GraphState` adds LangGraph metadata/next-node fields. The project cannot change after enqueue. |
 | `RunEvent` | UUID, event kind, typed payload, timestamp; append-only. |
 
@@ -574,7 +574,7 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 |---|---|---|---|---|
 | `POST` | `/api/v1/auth/*` | `fastapi-users` register, login, reset, verify | Public | `auth` |
 | `GET` | `/api/v1/users/me` | Current user | Bearer | `read` |
-| `GET` | `/api/v1/chat` | The user's single chat, ordered turns (`after` cursor), selected context/version, pending selection, linked run ids | Bearer | `read` |
+| `GET` | `/api/v1/chat` | The user's single chat, ordered turns (`after` cursor), selected context/version, pending selection, linked run ids and current run statuses | Bearer | `read` |
 | `POST` | `/api/v1/chat/messages` | Persist `{message, request_selection?}` and queue pre-run processing; returns `202 {turn_id}` | Bearer | `run_create` |
 | `POST` | `/api/v1/chat/messages/{turn_id}/selection` | Confirm manual project/feature choice for that pending message; returns `202 {run_id, project_id, context_version}` | Bearer + owner | `write` + `run_create` when enqueueing |
 | `POST` | `/api/v1/chat/messages/{turn_id}/cancel` | Cancel a pending selection without running the message or changing context | Bearer + owner | `write` |
@@ -598,7 +598,8 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 
 - `POST /chat/messages` returns `202 {turn_id}` after persisting the user turn and the server-side context
   snapshot. It does not accept an arbitrary target project. `GET /chat` exposes the request status, any menu
-  prompt, and its run id once enqueued. Recent turns are paginated by an ordered sequence cursor.
+  prompt, and the linked run id and current status once enqueued. Recent turns are paginated by an ordered
+  sequence cursor.
 - `POST /chat/messages/{turn_id}/selection` accepts `context_version`, `choice` (`continue_current`,
   `existing_project`, or `new_project`), and `feature_mode` (`continue` or `new`). `existing_project` requires
   an owned `project_id`; `new_project` requires a user-confirmed title and `feature_mode=new`. Continuing uses

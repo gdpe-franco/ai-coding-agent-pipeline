@@ -936,6 +936,16 @@ class SqlAlchemyRepository:
             (await self.session.execute(stmt.order_by(ConversationTurn.sequence))).scalars()
         )
 
+    async def run_statuses(
+        self, owner_id: uuid.UUID, run_ids: set[uuid.UUID]
+    ) -> dict[uuid.UUID, RunStatus]:
+        if not run_ids:
+            return {}
+        result = await self.session.execute(
+            select(Run.id, Run.status).where(Run.owner_id == owner_id, Run.id.in_(run_ids))
+        )
+        return {run_id: status for run_id, status in result}
+
     # Queue
 
     async def claim(self, worker_id: str, stale_after_seconds: int = 60) -> RunState | None:

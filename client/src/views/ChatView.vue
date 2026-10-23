@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import { request } from "../api";
+import StatusBadge from "../components/StatusBadge.vue";
 import type {
   Chat,
   ChatSelectionCreate,
@@ -8,6 +9,7 @@ import type {
   ChatSelectionChoice,
   ConversationTurn,
   FeatureMode,
+  RunStatus,
 } from "../types";
 
 const chat = ref<Chat | null>(null);
@@ -31,17 +33,31 @@ function refresh(force = false): Promise<void> {
       const isClassifying = chat.value?.turns.some(
         (turn) => turn.request_status === "received" || turn.request_status === "classifying",
       );
-      const cursor = lastSequence === undefined || isClassifying ? "" : `?after=${lastSequence}`;
+      const hasActiveRun = chat.value?.turns.some(
+        (turn) => turn.run_status === "pending" || turn.run_status === "running",
+      );
+      const cursor =
+        lastSequence === undefined || isClassifying || hasActiveRun ? "" : `?after=${lastSequence}`;
       const latest = await request<Chat>(`/chat${cursor}`);
       if (!chat.value) {
         chat.value = latest;
       } else {
         const knownTurns = new Set(chat.value.turns.map((turn) => turn.id));
         const updatedTurns = new Map(latest.turns.map((turn) => [turn.id, turn]));
+        const latestRunStatuses = new Map<string, RunStatus>();
+        for (const turn of latest.turns) {
+          if (turn.run_id && turn.run_status) {
+            latestRunStatuses.set(turn.run_id, turn.run_status);
+          }
+        }
         chat.value = {
           ...latest,
           turns: [
-            ...chat.value.turns.map((turn) => updatedTurns.get(turn.id) ?? turn),
+            ...chat.value.turns.map((turn) => {
+              const updated = updatedTurns.get(turn.id) ?? turn;
+              const runStatus = turn.run_id ? latestRunStatuses.get(turn.run_id) : undefined;
+              return runStatus ? { ...updated, run_status: runStatus } : updated;
+            }),
             ...latest.turns.filter((turn) => !knownTurns.has(turn.id)),
           ],
         };
@@ -131,6 +147,7 @@ async function submitSelection(selection: ChatSelectionCreate): Promise<void> {
     applySelection(pending.turn_id, {
       run_id: result.run_id,
       project_id: result.project_id,
+      run_status: "pending",
       request_status: "enqueued",
     });
     startingNewProject.value = false;
@@ -195,6 +212,13 @@ onUnmounted(() => {
         >
           Checking the current project and feature…
         </p>
+        <div
+          v-if="turn.role === 'user' && turn.run_status"
+          class="mt-2 flex items-center gap-2 text-xs text-slate-400"
+          role="status"
+        >
+          Run <StatusBadge :status="turn.run_status" />
+        </div>
         <section
           v-if="chat?.pending_selection?.turn_id === turn.id"
           class="mt-4 space-y-3 border-t border-slate-700 pt-4"
