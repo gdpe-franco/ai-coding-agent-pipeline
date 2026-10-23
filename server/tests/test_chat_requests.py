@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -47,6 +48,35 @@ async def _request_context(session_factory, repo_factory, email: str):
         request = await repo.create_chat_request(user.id, "Add a settings screen")
         await repo.commit()
     return user, project, feature, request
+
+
+@pytest.mark.asyncio
+async def test_project_history_excludes_other_projects_and_unassigned_turns(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        user = await create_test_user(session, "project-history@example.com")
+        repo = SqlAlchemyRepository(session)
+        older_project = await repo.create_project(user.id, "Older")
+        other_project = await repo.create_project(user.id, "Other")
+        await repo.add_conversation_turn(
+            user.id,
+            "Older project discussion",
+            ConversationSender.USER,
+            project_id=older_project.id,
+        )
+        await repo.add_conversation_turn(
+            user.id,
+            "Other project discussion",
+            ConversationSender.USER,
+            project_id=other_project.id,
+        )
+        await repo.add_conversation_turn(user.id, "Unassigned request", ConversationSender.USER)
+        await repo.commit()
+
+        history = await repo.list_conversation_turns(user.id, older_project.id)
+
+    assert [turn.content for turn in history] == ["Older project discussion"]
 
 
 @pytest.mark.asyncio
@@ -214,6 +244,26 @@ def test_manual_selection_changes_project_and_feature_only_on_confirmation(
             (seed["run_id"], other_seed["run_id"]),
         )
         connection.execute(
+            "UPDATE runs SET plan=%s::jsonb, latest_code=%s::jsonb, feedback=%s::jsonb, checks=%s::jsonb WHERE id=%s",
+            (
+                json.dumps({"summary": "current project plan"}),
+                json.dumps([{"file_path": "current.html", "content": "current"}]),
+                json.dumps({"summary": "current feedback"}),
+                json.dumps({"ok": "current"}),
+                seed["run_id"],
+            ),
+        )
+        connection.execute(
+            "UPDATE runs SET plan=%s::jsonb, latest_code=%s::jsonb, feedback=%s::jsonb, checks=%s::jsonb WHERE id=%s",
+            (
+                json.dumps({"summary": "older project plan"}),
+                json.dumps([{"file_path": "older.html", "content": "older"}]),
+                json.dumps({"summary": "older feedback"}),
+                json.dumps({"ok": "older"}),
+                other_seed["run_id"],
+            ),
+        )
+        connection.execute(
             "UPDATE conversations SET selected_project_id=%s, active_feature_run_id=%s, context_version=3",
             (current["id"], seed["run_id"]),
         )
@@ -245,6 +295,9 @@ def test_manual_selection_changes_project_and_feature_only_on_confirmation(
     assert chat["selected_project_id"] == current["id"]
     assert chat["active_feature_run_id"] == first["run_id"]
     assert chat["context_version"] == first["context_version"] == 4
+    first_run = client.get(f"/api/v1/runs/{first['run_id']}", headers=headers).json()
+    assert first_run["plan"] is None
+    assert first_run["latest_code"] == []
 
     with psycopg.connect(Settings().psycopg_url) as connection:
         connection.execute("UPDATE runs SET status='completed' WHERE id=%s", (first["run_id"],))
@@ -292,6 +345,11 @@ def test_manual_selection_changes_project_and_feature_only_on_confirmation(
     assert switched_chat["selected_project_id"] == other["id"]
     assert switched_chat["active_feature_run_id"] == other_seed["run_id"]
     assert switched_chat["context_version"] == 5
+    switched_run = client.get(f"/api/v1/runs/{switched.json()['run_id']}", headers=headers).json()
+    assert switched_run["plan"] == {"summary": "older project plan"}
+    assert switched_run["latest_code"] == [{"file_path": "older.html", "content": "older"}]
+    assert switched_run["feedback"] == {"summary": "older feedback"}
+    assert switched_run["checks"] == {"ok": "older"}
 
     blocked_turn = client.post(
         "/api/v1/chat/messages",

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.application.graph import CodingGraph
-from app.domain.enums import EventKind
+from app.domain.enums import ConversationSender, EventKind
 from app.domain.errors import ModelError, ResolverError
 from app.domain.models import CheckReport, Plan
 
@@ -101,17 +102,23 @@ class FakeWorkspace:
 
 
 class FakeMemory:
+    def __init__(self) -> None:
+        self.loaded: list[tuple[UUID, UUID]] = []
+
     async def load_project_memory(self, owner_id: UUID, project_id: UUID) -> str:
-        return ""
+        self.loaded.append((owner_id, project_id))
+        return f"memory for {project_id}"
 
 
 class ScriptedLLM:
     def __init__(self, replies: list[dict]) -> None:
         self.replies = list(replies)
         self.calls: list[str] = []
+        self.messages: list[list[dict[str, str]]] = []
 
     async def complete(self, role: str, messages, schema) -> dict:
         self.calls.append(role)
+        self.messages.append(messages)
         if not self.replies:
             raise AssertionError(f"unexpected {role} call")
         return self.replies.pop(0)
@@ -134,6 +141,33 @@ def make_graph(*, resolver=None, planner=None, coder=None, reviewer=None, report
         max_coder_attempts=3,
     )
     return graph, repo, workspace, clients
+
+
+async def test_planner_uses_only_selected_project_history_and_memory() -> None:
+    graph, repo, _, clients = make_graph(planner=[planner_reply()])
+    owner_id, selected_project, other_project, run_id, graph_run_id = (uuid4() for _ in range(5))
+    repo.turns[selected_project] = [
+        SimpleNamespace(role=ConversationSender.USER, content="selected project history")
+    ]
+    repo.turns[other_project] = [
+        SimpleNamespace(role=ConversationSender.USER, content="private other-project history")
+    ]
+
+    await graph.planner(
+        {
+            "owner_id": str(owner_id),
+            "project_id": str(selected_project),
+            "run_id": str(run_id),
+            "graph_run_id": str(graph_run_id),
+            "message": "Add a settings page",
+        }
+    )
+
+    prompt = clients["planner"].messages[0][1]["content"]
+    assert "selected project history" in prompt
+    assert "private other-project history" not in prompt
+    assert f"memory for {selected_project}" in prompt
+    assert graph.memory.loaded == [(owner_id, selected_project)]
 
 
 RESOLVER_NEW = {

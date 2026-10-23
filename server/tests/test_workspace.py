@@ -21,6 +21,15 @@ async def test_write_read_and_list_are_scoped(workspace: WebWorkspace) -> None:
     assert await workspace.read_all(project_id) == {"index.html": "<h1>hi</h1>"}
 
 
+async def test_project_workspaces_keep_files_isolated(workspace: WebWorkspace) -> None:
+    older_project, other_project = uuid4(), uuid4()
+    await workspace.write_file(older_project, "index.html", "older", {"index.html"})
+    await workspace.write_file(other_project, "index.html", "other", {"index.html"})
+
+    assert await workspace.read_all(older_project) == {"index.html": "older"}
+    assert await workspace.read_all(other_project) == {"index.html": "other"}
+
+
 async def test_write_outside_plan_is_refused(workspace: WebWorkspace) -> None:
     project_id = uuid4()
     with pytest.raises(WorkspaceError):

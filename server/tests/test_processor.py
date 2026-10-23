@@ -75,6 +75,14 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         project = await repo.create_project(user.id, "Result project")
         run = await repo.create_run(user.id, "request", project.id)
         await repo.update_run(run.id, status=RunStatus.RUNNING)
+        current_project = await repo.create_project(user.id, "Currently selected project")
+        current_run = await repo.create_run(user.id, "Current feature", current_project.id)
+        await repo.update_run(current_run.id, status=RunStatus.COMPLETED)
+        conversation = await repo.get_conversation(user.id)
+        conversation.selected_project_id = current_project.id
+        conversation.active_feature_run_id = current_run.id
+        conversation.context_version = 7
+        await repo.commit()
     await processor._finalize(
         run.id,
         {
@@ -91,13 +99,18 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         repo = SqlAlchemyRepository(session)
         turns = await repo.list_conversation_turns(user.id)
         saved_run = await repo.get_run_model(run.id)
+        conversation = await repo.get_conversation(user.id)
     assert [(turn.role, turn.content) for turn in turns] == [
         (ConversationSender.USER, "request"),
+        (ConversationSender.USER, "Current feature"),
         (ConversationSender.ASSISTANT, expected_reply),
     ]
-    assert [turn.run_id for turn in turns] == [run.id, run.id]
-    assert all(turn.project_id == project.id for turn in turns)
+    assert [turn.run_id for turn in turns] == [run.id, current_run.id, run.id]
+    assert [turn.project_id for turn in turns] == [project.id, current_project.id, project.id]
     assert saved_run.status == expected_status
+    assert conversation.selected_project_id == current_project.id
+    assert conversation.active_feature_run_id == current_run.id
+    assert conversation.context_version == 7
 
 
 async def test_failure_is_saved_as_assistant_turn(processor_context) -> None:
