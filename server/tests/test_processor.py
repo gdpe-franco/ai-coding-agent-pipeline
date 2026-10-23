@@ -133,17 +133,16 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
     previous_preview = {"approved.html": "<h1>last approved</h1>"}
     processor.workspace.files = {"index.html": "<h1>preserved</h1>"}
     processor.workspace.preview = dict(previous_preview)
-    await processor._finalize(
-        run.id,
-        {
-            "project_id": str(project.id),
-            **result,
-            "attempts_total": result["attempts_total"],
-            "plan": plan,
-            "code": code,
-            "checks": checks,
-        },
-    )
+    graph_result = {
+        "project_id": str(project.id),
+        **result,
+        "attempts_total": result["attempts_total"],
+        "plan": plan,
+        "code": code,
+        "checks": checks,
+    }
+    await processor._finalize(run.id, graph_result)
+    await processor._finalize(run.id, graph_result)
     await processor._fail(run.id, RuntimeError("late worker failure"))
 
     async with session_factory() as session:

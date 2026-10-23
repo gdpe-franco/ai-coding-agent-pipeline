@@ -27,7 +27,12 @@ async def _seed_run(session_factory):
     async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         user = await create_test_user(session, f"{uuid4().hex}@example.com")
-        run = await repo.create_run(user.id, "build", None)
+        run = await repo.create_run(
+            user.id,
+            "build",
+            None,
+            latest_code=[{"file_path": "index.html", "content": "accepted"}],
+        )
         return run.id
 
 
@@ -38,6 +43,7 @@ async def test_claim_pending_and_stale_running(session_factory) -> None:
         claimed = await repo.claim("worker-a")
         assert claimed is not None and claimed.id == run_id
         assert claimed.status == RunStatus.RUNNING
+        assert claimed.latest_code == [{"file_path": "index.html", "content": "accepted"}]
         await repo.release(run_id)
 
     async with session_factory() as session:
@@ -56,6 +62,7 @@ async def test_claim_pending_and_stale_running(session_factory) -> None:
         repo = SqlAlchemyRepository(session)
         claimed = await repo.claim("worker-c")
         assert claimed is not None and claimed.id == run_id
+        assert claimed.latest_code == [{"file_path": "index.html", "content": "accepted"}]
 
 
 async def test_awaiting_user_is_not_claimable(session_factory) -> None:

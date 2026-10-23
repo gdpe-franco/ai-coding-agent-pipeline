@@ -130,6 +130,45 @@ async def test_worker_reclaims_stale_classification(session_factory, repo_factor
     assert saved.request_status == ChatRequestStatus.CLASSIFYING
 
 
+@pytest.mark.asyncio
+async def test_reclaimed_chat_request_enqueues_once(session_factory, repo_factory) -> None:
+    _, project, _, request = await _request_context(
+        session_factory, repo_factory, "reclaimed-once@example.com"
+    )
+    async with session_factory() as session:
+        await session.execute(
+            update(ConversationTurn)
+            .where(ConversationTurn.id == request.id)
+            .values(
+                request_status=ChatRequestStatus.CLASSIFYING,
+                locked_by="dead-worker",
+                heartbeat_at=datetime.now(UTC) - timedelta(seconds=61),
+            )
+        )
+        await session.commit()
+
+    processor = ChatRequestProcessor(
+        repo_factory,
+        FakeIntentLLM({"action": "continue_current", "reason": "Continue."}),
+        "recovery-worker",
+        heartbeat_seconds=3600,
+        stale_seconds=60,
+        max_runs_per_project=100,
+    )
+    assert await processor.process_one()
+    assert not await processor.process_one()
+
+    async with session_factory() as session:
+        turn = await session.get(ConversationTurn, request.id)
+        runs = list(
+            (await session.execute(select(Run).where(Run.project_id == project.id))).scalars()
+        )
+    assert turn.request_status == ChatRequestStatus.ENQUEUED
+    assert turn.run_id is not None
+    assert len(runs) == 2
+    assert sum(run.id == turn.run_id for run in runs) == 1
+
+
 @pytest.mark.parametrize(
     ("response", "intent_error"),
     [

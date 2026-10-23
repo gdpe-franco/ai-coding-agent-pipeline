@@ -897,8 +897,9 @@ RETURNING *;
   returns `409` at the cap.
 - Worker concurrency is a code constant of 2 runs per process. Run one Worker process per container;
   horizontal workers are safe because of `SKIP LOCKED`.
-- Graceful shutdown stops claiming, finishes or releases the current checkpoint, and clears the lock. A hard crash
-  is recovered by stale-heartbeat reclaim.
+- SIGTERM/SIGINT stops new claims. The Worker gives active processing 10 seconds to finish, then cancels the
+  remainder so run locks are released; interrupted chat classification is recovered through stale-heartbeat
+  reclaim. Docker allows 20 seconds before force-killing the Worker.
 - `DELETE /runs/{id}` is terminal-only; there is no mid-run cancellation. The maintenance loop deletes expired
   rate-limit windows and runs the 30-day archive job.
 

@@ -33,6 +33,7 @@ services:
   worker:
     build: .
     command: ["python", "-m", "app.worker"]
+    stop_grace_period: 20s
     healthcheck:
       disable: true
     env_file:

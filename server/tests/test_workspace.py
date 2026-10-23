@@ -30,6 +30,15 @@ async def test_project_workspaces_keep_files_isolated(workspace: WebWorkspace) -
     assert await workspace.read_all(other_project) == {"index.html": "other"}
 
 
+async def test_project_files_survive_workspace_adapter_recreation(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    await workspace.write_file(project_id, "index.html", "accepted", {"index.html"})
+
+    restarted = WebWorkspace(workspace.root, node_binary="definitely-missing-node")
+
+    assert await restarted.read_all(project_id) == {"index.html": "accepted"}
+
+
 async def test_write_outside_plan_is_refused(workspace: WebWorkspace) -> None:
     project_id = uuid4()
     with pytest.raises(WorkspaceError):
