@@ -73,6 +73,15 @@ function refresh(force = false): Promise<void> {
   return pending;
 }
 
+function unavailableResources(turn: ConversationTurn): string | null {
+  const deletedRun =
+    turn.run_id === null && (turn.role === "assistant" || turn.request_status === "enqueued");
+  if (!deletedRun) return null;
+  return turn.project_id
+    ? "Related run unavailable (deleted)."
+    : "Related project and run unavailable (deleted).";
+}
+
 async function send() {
   const message = draft.value.trim();
   if (!message || sending.value) return;
@@ -219,6 +228,13 @@ onUnmounted(() => {
         >
           Run <StatusBadge :status="turn.run_status" />
         </div>
+        <p
+          v-if="unavailableResources(turn)"
+          class="mt-2 text-xs text-slate-400"
+          role="status"
+        >
+          {{ unavailableResources(turn) }}
+        </p>
         <section
           v-if="chat?.pending_selection?.turn_id === turn.id"
           class="mt-4 space-y-3 border-t border-slate-700 pt-4"

@@ -580,7 +580,7 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 | `POST` | `/api/v1/chat/messages/{turn_id}/cancel` | Cancel a pending selection without running the message or changing context | Bearer + owner | `write` |
 | `GET` | `/api/v1/projects` | List the user's projects | Bearer | `read` |
 | `GET` | `/api/v1/projects/{project_id}` | Project detail and summary | Bearer + owner | `read` |
-| `DELETE` | `/api/v1/projects/{project_id}` | Delete project, workspace, memory, related data | Bearer + owner | `write` |
+| `DELETE` | `/api/v1/projects/{project_id}` | Delete a terminal project, workspace, memory, and related data; `409` while a run is non-terminal | Bearer + owner | `write` |
 | `GET` | `/api/v1/projects/{project_id}/files` | List current files | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/files/{path}` | Read one file; path validated | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/preview-url` | Return the capability URL | Bearer + owner | `read` |
@@ -936,11 +936,14 @@ and Coder read through the Workspace port; the MVP does not include a manual cod
   at enqueue, and appends replies on completion, failure, or handoff. Selection and intent failures stay in the
   same chat even when no run/project exists. Run cards show their own project/feature labels independently of
   the chat's current context. Guidance targets a specific handoff; selecting that project alone does not resume it.
-- `DELETE /runs/{id}` cascades artifacts, events, reviews, and trace rows but leaves the project and latest files.
+- `DELETE /runs/{id}` cascades artifacts, events, reviews, and trace rows, removes that run's archive, and leaves
+  the project and latest files. Deleting its active-feature reference clears that pointer and increments
+  `context_version`.
   `DELETE /projects/{id}` removes the owner's project, workspace, preview snapshot, memory namespace, and related
   run rows. The user-wide chat remains; deleted project/run links become null and corresponding cards indicate
-  unavailable resources. Deleting the selected project clears its context and the next request needs selection.
-  Deleting an active-feature run clears that feature reference; messages awaiting selection must be revalidated.
+  unavailable resources. Deleting a project with any non-terminal run returns `409`; there is no mid-run
+  cancellation. Deleting the selected project clears its context, increments `context_version`, and the next
+  request needs selection. Messages awaiting selection must be revalidated.
 - Active runs, including handoffs, are retained indefinitely. Completed runs older than 30 days archive source
   snapshots under `data/archived/{project_id}/{run_id}/` and set `runs.archived=true`. Archive that run's
   artifacts, not another run's latest files; keep the current workspace and served preview intact. Events stay

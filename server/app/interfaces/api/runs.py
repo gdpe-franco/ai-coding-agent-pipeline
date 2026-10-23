@@ -259,4 +259,6 @@ async def delete_run(
     artifact_ids = await repo.list_artifact_ids_for_run(run_id)
     for artifact_id in artifact_ids:
         await request.app.state.container.workspace.delete_artifact(artifact_id)
+    if run.project_id is not None:
+        await request.app.state.container.workspace.delete_run_archive(run.project_id, run.id)
     await repo.delete_run(run_id)

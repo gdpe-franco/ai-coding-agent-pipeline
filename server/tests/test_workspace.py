@@ -39,6 +39,27 @@ async def test_project_files_survive_workspace_adapter_recreation(workspace: Web
     assert await restarted.read_all(project_id) == {"index.html": "accepted"}
 
 
+async def test_run_archives_are_isolated_and_removed_with_their_resource(
+    workspace: WebWorkspace,
+) -> None:
+    project_a, project_b = uuid4(), uuid4()
+    run_a, run_b = uuid4(), uuid4()
+    await workspace.archive_run(project_a, run_a, {"index.html": "run a"})
+    await workspace.archive_run(project_b, run_b, {"index.html": "run b"})
+    archive_a = workspace.root / "archived" / str(project_a) / str(run_a) / "index.html"
+    archive_b = workspace.root / "archived" / str(project_b) / str(run_b) / "index.html"
+
+    assert archive_a.read_text(encoding="utf-8") == "run a"
+    assert archive_b.read_text(encoding="utf-8") == "run b"
+    await workspace.delete_run_archive(project_a, run_a)
+    assert not archive_a.exists()
+    assert archive_b.exists()
+    await workspace.archive_run(project_a, run_a, {"index.html": "run a"})
+    await workspace.delete_project(project_a)
+    assert not (workspace.root / "archived" / str(project_a)).exists()
+    assert archive_b.exists()
+
+
 async def test_write_outside_plan_is_refused(workspace: WebWorkspace) -> None:
     project_id = uuid4()
     with pytest.raises(WorkspaceError):
@@ -104,3 +125,24 @@ async def test_publish_and_artifacts_round_trip(workspace: WebWorkspace) -> None
     await workspace.delete_artifact(artifact_id)
     await workspace.delete_project(project_id)
     assert await workspace.list_files(project_id) == []
+
+
+async def test_archive_run_preserves_relative_files_and_project_cleanup(
+    workspace: WebWorkspace,
+) -> None:
+    project_id, run_id = uuid4(), uuid4()
+    await workspace.write_file(project_id, "index.html", "latest", {"index.html"})
+    await workspace.publish(project_id, {"index.html": "approved"}, {})
+
+    await workspace.archive_run(project_id, run_id, {"index.html": "run snapshot"})
+
+    archived = workspace.root / "archived" / str(project_id) / str(run_id) / "index.html"
+    assert archived.read_text(encoding="utf-8") == "run snapshot"
+    assert await workspace.read_file(project_id, "index.html") == "latest"
+    assert await workspace.read_preview(project_id, "index.html") == b"approved"
+    await workspace.delete_run_archive(project_id, run_id)
+    assert not archived.exists()
+
+    await workspace.archive_run(project_id, run_id, {"index.html": "run snapshot"})
+    await workspace.delete_project(project_id)
+    assert not (workspace.root / "archived" / str(project_id)).exists()

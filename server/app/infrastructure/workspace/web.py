@@ -28,6 +28,9 @@ class WebWorkspace(Workspace):
     def _preview_dir(self, project_id: UUID) -> Path:
         return self.root / "preview" / str(project_id)
 
+    def _archive_dir(self, project_id: UUID, run_id: UUID) -> Path:
+        return self.root / "archived" / str(project_id) / str(run_id)
+
     def _resolve(self, project_id: UUID, path: str) -> Path:
         try:
             validate_relative_path(path)
@@ -137,10 +140,36 @@ class WebWorkspace(Workspace):
         if directory.exists():
             shutil.rmtree(directory)
 
+    async def archive_run(self, project_id: UUID, run_id: UUID, files: dict[str, str]) -> None:
+        base = self._archive_dir(project_id, run_id)
+        for path, content in files.items():
+            try:
+                validate_relative_path(path)
+            except ValueError as exc:
+                raise WorkspaceError(str(exc)) from exc
+            target = (base / path).resolve()
+            if base not in target.parents:
+                raise WorkspaceError("path escapes the run archive")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=".tmp-archive-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                os.replace(temp_name, target)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
+
+    async def delete_run_archive(self, project_id: UUID, run_id: UUID) -> None:
+        directory = self._archive_dir(project_id, run_id)
+        if directory.exists():
+            shutil.rmtree(directory)
+
     async def delete_project(self, project_id: UUID) -> None:
         for directory in (
             self._project_dir(project_id),
             self._preview_dir(project_id),
+            self.root / "archived" / str(project_id),
         ):
             if directory.exists():
                 shutil.rmtree(directory)

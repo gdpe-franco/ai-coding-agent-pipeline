@@ -412,6 +412,160 @@ def test_project_lifecycle_and_owner_scoping(client: TestClient) -> None:
     )
 
 
+@pytest.mark.parametrize("run_status", ["pending", "running", "awaiting_user"])
+def test_project_delete_rejects_nonterminal_runs(
+    client: TestClient, settings: Settings, run_status: str
+) -> None:
+    token = register_and_login(client, "active-project@example.com")
+    headers = auth_headers(token)
+    project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Active", "summary": ""}
+    ).json()
+    run = client.post(
+        "/api/v1/runs",
+        headers=headers,
+        json={"message": "in progress", "project_id": project["id"]},
+    ).json()
+    source = settings.data_dir / "projects" / project["id"] / "index.html"
+    preview = settings.data_dir / "preview" / project["id"] / "index.html"
+    source.parent.mkdir(parents=True)
+    preview.parent.mkdir(parents=True)
+    source.write_text("source", encoding="utf-8")
+    preview.write_text("preview", encoding="utf-8")
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE runs SET status=%s WHERE id=%s", (run_status, run["run_id"]))
+        connection.commit()
+
+    deleted = client.delete(f"/api/v1/projects/{project['id']}", headers=headers)
+
+    assert deleted.status_code == 409
+    assert client.get(f"/api/v1/projects/{project['id']}", headers=headers).status_code == 200
+    assert source.read_text(encoding="utf-8") == "source"
+    assert preview.read_text(encoding="utf-8") == "preview"
+
+
+def test_project_delete_cleans_resources_and_preserves_chat(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = register_and_login(client, "delete-project@example.com")
+    headers = auth_headers(token)
+    owner_id = client.get("/api/v1/users/me", headers=headers).json()["id"]
+    deleted_memory: list[tuple[str, str]] = []
+
+    async def delete_memory(owner, project) -> None:
+        deleted_memory.append((str(owner), str(project)))
+
+    monkeypatch.setattr(client.app.state.container.memory, "delete_project", delete_memory)
+    posted = client.post("/api/v1/chat/messages", headers=headers, json={"message": "Build it"})
+    pending = client.get("/api/v1/chat", headers=headers).json()["pending_selection"]
+    selected = _confirm_new_project(
+        client, headers, posted.json()["turn_id"], pending["context_version"], "Delete me"
+    )
+    run_id = selected.json()["run_id"]
+    project_id = selected.json()["project_id"]
+    preview_id = client.get(f"/api/v1/projects/{project_id}", headers=headers).json()["preview_id"]
+    artifact_id, graph_run_id = uuid4(), uuid4()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE runs SET status='completed' WHERE id=%s", (run_id,))
+        connection.execute(
+            "INSERT INTO conversation_turns"
+            " (id,conversation_id,project_id,run_id,role,content,sequence)"
+            " VALUES (%s,(SELECT id FROM conversations WHERE owner_id="
+            " (SELECT id FROM users WHERE email='delete-project@example.com')),%s,%s,'assistant','Approved',2)",
+            (str(uuid4()), project_id, run_id),
+        )
+        connection.execute(
+            "INSERT INTO artifacts (id,run_id,file_path,file_type,checksum)"
+            " VALUES (%s,%s,'index.html','html',%s)",
+            (str(artifact_id), run_id, "a" * 64),
+        )
+        connection.execute(
+            "INSERT INTO events (id,run_id,kind,payload) VALUES (%s,%s,'run_start','{}'::jsonb)",
+            (str(uuid4()), run_id),
+        )
+        connection.execute(
+            "INSERT INTO reviews (id,run_id,verdict,summary,issues)"
+            " VALUES (%s,%s,'approve','good','[]'::jsonb)",
+            (str(uuid4()), run_id),
+        )
+        connection.execute(
+            "INSERT INTO graph_runs (id,run_id,round,thread_id) VALUES (%s,%s,1,%s)",
+            (str(graph_run_id), run_id, f"{run_id}:1"),
+        )
+        connection.execute(
+            "INSERT INTO graph_events (id,graph_run_id,node,payload)"
+            " VALUES (%s,%s,'planner','{}'::jsonb)",
+            (str(uuid4()), str(graph_run_id)),
+        )
+        connection.commit()
+
+    project_dir = settings.data_dir / "projects" / project_id
+    preview_dir = settings.data_dir / "preview" / project_id
+    artifact_dir = settings.data_dir / "artifacts" / str(artifact_id)
+    archive_dir = settings.data_dir / "archived" / project_id / run_id
+    for directory in (project_dir, preview_dir, artifact_dir, archive_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "index.html").write_text("data", encoding="utf-8")
+
+    deleted = client.delete(f"/api/v1/projects/{project_id}", headers=headers)
+
+    assert deleted.status_code == 204
+    assert deleted_memory == [(owner_id, project_id)]
+    assert all(not path.exists() for path in (project_dir, preview_dir, artifact_dir, archive_dir))
+    assert client.get(f"/api/v1/projects/{project_id}", headers=headers).status_code == 404
+    assert client.get(f"/preview/{preview_id}/index.html").status_code == 404
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM runs WHERE id=%s", (run_id,)).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM events WHERE run_id=%s", (run_id,)).fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM reviews WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM graph_runs WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM graph_events WHERE graph_run_id=%s", (graph_run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+    chat = client.get("/api/v1/chat", headers=headers).json()
+    assert chat["selected_project_id"] is None
+    assert chat["active_feature_run_id"] is None
+    assert chat["context_version"] == selected.json()["context_version"] + 1
+    assert [turn["content"] for turn in chat["turns"]] == ["Build it", "Approved"]
+    assert all(turn["project_id"] is None and turn["run_id"] is None for turn in chat["turns"])
+    assert chat["turns"][0]["request_status"] == "enqueued"
+    next_request = client.post(
+        "/api/v1/chat/messages", headers=headers, json={"message": "Another project"}
+    )
+    assert next_request.status_code == 202
+    assert (
+        client.get("/api/v1/chat", headers=headers).json()["pending_selection"]["turn_id"]
+        == (next_request.json()["turn_id"])
+    )
+
+
 def test_file_read_rejects_traversal(client: TestClient, settings: Settings) -> None:
     token = register_and_login(client, "alice@example.com")
     project = client.post(
@@ -702,17 +856,134 @@ def test_switching_context_does_not_resume_or_close_handoff(client: TestClient) 
     assert unchanged["attempts_total"] == 6
 
 
-def test_delete_terminal_run(client: TestClient) -> None:
+def test_delete_terminal_run_removes_run_resources_and_keeps_project(
+    client: TestClient, settings: Settings
+) -> None:
     token = register_and_login(client, "alice@example.com")
-    run = client.post("/api/v1/runs", headers=auth_headers(token), json={"message": "new"}).json()
+    headers = auth_headers(token)
+    project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Keep project", "summary": ""}
+    ).json()
+    run = client.post(
+        "/api/v1/runs",
+        headers=headers,
+        json={"message": "new", "project_id": project["id"]},
+    ).json()
     run_id = run["run_id"]
+    artifact_id, graph_run_id = uuid4(), uuid4()
 
-    assert client.delete(f"/api/v1/runs/{run_id}", headers=auth_headers(token)).status_code == 409
+    assert client.delete(f"/api/v1/runs/{run_id}", headers=headers).status_code == 409
     with psycopg.connect(Settings().psycopg_url) as connection:
+        conversation_id = connection.execute(
+            "SELECT conversation_id FROM runs WHERE id=%s", (run_id,)
+        ).fetchone()[0]
         connection.execute("UPDATE runs SET status='completed' WHERE id=%s", (run_id,))
+        connection.execute(
+            "UPDATE conversations SET selected_project_id=%s, active_feature_run_id=%s, context_version=1"
+            " WHERE owner_id=(SELECT id FROM users WHERE email='alice@example.com')",
+            (project["id"], run_id),
+        )
+        connection.execute(
+            "UPDATE conversation_turns SET request_status='enqueued' WHERE run_id=%s",
+            (run_id,),
+        )
+        connection.execute(
+            "INSERT INTO conversation_turns (id,conversation_id,project_id,run_id,role,content,sequence)"
+            " VALUES (%s,%s,%s,%s,'assistant','Approved',2)",
+            (str(uuid4()), conversation_id, project["id"], run_id),
+        )
+        connection.execute(
+            "INSERT INTO artifacts (id,run_id,file_path,file_type,checksum)"
+            " VALUES (%s,%s,'index.html','html',%s)",
+            (str(artifact_id), run_id, "a" * 64),
+        )
+        connection.execute(
+            "INSERT INTO events (id,run_id,kind,payload) VALUES (%s,%s,'run_start','{}'::jsonb)",
+            (str(uuid4()), run_id),
+        )
+        connection.execute(
+            "INSERT INTO reviews (id,run_id,verdict,summary,issues)"
+            " VALUES (%s,%s,'approve','good','[]'::jsonb)",
+            (str(uuid4()), run_id),
+        )
+        connection.execute(
+            "INSERT INTO graph_runs (id,run_id,round,thread_id) VALUES (%s,%s,1,%s)",
+            (str(graph_run_id), run_id, f"{run_id}:1"),
+        )
+        connection.execute(
+            "INSERT INTO graph_events (id,graph_run_id,node,payload)"
+            " VALUES (%s,%s,'planner','{}'::jsonb)",
+            (str(uuid4()), str(graph_run_id)),
+        )
         connection.commit()
-    assert client.delete(f"/api/v1/runs/{run_id}", headers=auth_headers(token)).status_code == 204
-    assert client.get(f"/api/v1/runs/{run_id}", headers=auth_headers(token)).status_code == 404
+
+    source = settings.data_dir / "projects" / project["id"] / "index.html"
+    preview = settings.data_dir / "preview" / project["id"] / "index.html"
+    artifact = settings.data_dir / "artifacts" / str(artifact_id) / "index.html"
+    archive = settings.data_dir / "archived" / project["id"] / run_id / "index.html"
+    for path, content in (
+        (source, "current project"),
+        (preview, "approved preview"),
+        (artifact, "run artifact"),
+        (archive, "run archive"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    assert client.delete(f"/api/v1/runs/{run_id}", headers=headers).status_code == 204
+    assert client.get(f"/api/v1/runs/{run_id}", headers=headers).status_code == 404
+    assert client.get(f"/api/v1/projects/{project['id']}", headers=headers).status_code == 200
+    assert client.get(f"/api/v1/projects/{project['id']}/files", headers=headers).json() == {
+        "files": ["index.html"]
+    }
+    assert client.get(f"/preview/{project['preview_id']}/index.html").text == "approved preview"
+    assert source.read_text(encoding="utf-8") == "current project"
+    assert not artifact.exists() and not archive.exists()
+    chat = client.get("/api/v1/chat", headers=headers).json()
+    assert chat["selected_project_id"] == project["id"]
+    assert chat["active_feature_run_id"] is None
+    assert chat["context_version"] == 2
+    assert [turn["content"] for turn in chat["turns"]] == ["new", "Approved"]
+    assert [turn["run_id"] for turn in chat["turns"]] == [None, None]
+    assert all(turn["project_id"] == project["id"] for turn in chat["turns"])
+    assert chat["turns"][0]["request_status"] == "enqueued"
+
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM events WHERE run_id=%s", (run_id,)).fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM reviews WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM graph_runs WHERE run_id=%s", (run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM graph_events WHERE graph_run_id=%s", (graph_run_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert connection.execute("SELECT COUNT(*) FROM graph_events").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM runs WHERE id=%s", (run_id,)).fetchone()[0]
+            == 0
+        )
 
 
 def test_artifact_content_matches_checksum(client: TestClient, settings: Settings) -> None:

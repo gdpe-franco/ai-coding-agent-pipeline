@@ -7,6 +7,7 @@ import signal
 import socket
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -14,6 +15,7 @@ from langgraph.store.postgres import AsyncPostgresStore
 
 from app.application.chat import ChatRequestProcessor
 from app.application.processor import RunProcessor
+from app.domain.errors import WorkspaceError
 from app.domain.models import RunState
 from app.infrastructure.container import Container
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
@@ -22,6 +24,8 @@ from app.settings import Settings
 logger = logging.getLogger(__name__)
 RUN_CONCURRENCY = 2
 SHUTDOWN_GRACE_SECONDS = 10.0
+MAINTENANCE_INTERVAL_SECONDS = 3600
+RETENTION_DAYS = 30
 
 
 async def _run_claim_loop(
@@ -82,6 +86,62 @@ async def _run_claim_loop(
             await asyncio.gather(*outstanding, return_exceptions=True)
 
 
+async def run_maintenance(
+    repo_factory,
+    workspace,
+    saver,
+    now: datetime | None = None,
+    stale_after_seconds: int = 60,
+) -> None:
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(days=RETENTION_DAYS)
+    checkpoint_threads: list[str] = []
+    async with repo_factory() as repo:
+        for run in await repo.completed_runs_to_archive(cutoff):
+            if run.project_id is None:
+                continue
+            try:
+                artifacts = await repo.artifacts_for_run(run.id)
+                files = {
+                    artifact.file_path: await workspace.read_artifact(
+                        artifact.id, artifact.file_path
+                    )
+                    for artifact in artifacts
+                }
+                await workspace.archive_run(run.project_id, run.id, files)
+            except OSError, WorkspaceError:
+                logger.exception("could not archive completed run %s", run.id)
+                continue
+            await repo.mark_run_archived(run.id)
+
+        checkpoint_threads = await repo.terminal_checkpoint_threads(cutoff)
+        await repo.delete_expired_rate_limits(now)
+        await repo.delete_stale_worker_heartbeats(now - timedelta(seconds=stale_after_seconds))
+        await repo.session.commit()
+
+    for thread_id in checkpoint_threads:
+        await saver.adelete_thread(thread_id)
+
+
+async def _maintenance_loop(
+    repo_factory, workspace, saver, stop_event: asyncio.Event, stale_after_seconds: int
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await run_maintenance(
+                repo_factory,
+                workspace,
+                saver,
+                stale_after_seconds=stale_after_seconds,
+            )
+        except Exception:
+            logger.exception("worker maintenance failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=MAINTENANCE_INTERVAL_SECONDS)
+        except TimeoutError:
+            pass
+
+
 async def run_worker(settings: Settings) -> None:
     container = Container(settings)
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -133,6 +193,15 @@ async def run_worker(settings: Settings) -> None:
                     except NotImplementedError, RuntimeError:
                         continue
                     handled_signals.append(sig)
+                maintenance_task = asyncio.create_task(
+                    _maintenance_loop(
+                        container.repository_context,
+                        container.workspace,
+                        saver,
+                        stop_event,
+                        int(settings.worker_stale_seconds),
+                    )
+                )
                 try:
                     await _run_claim_loop(
                         chat_processor,
@@ -143,6 +212,8 @@ async def run_worker(settings: Settings) -> None:
                         settings.worker_poll_seconds,
                     )
                 finally:
+                    maintenance_task.cancel()
+                    await asyncio.gather(maintenance_task, return_exceptions=True)
                     for sig in handled_signals:
                         loop.remove_signal_handler(sig)
     finally:

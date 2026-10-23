@@ -73,9 +73,14 @@ async def delete_project(
     user: User = Depends(get_current_user),
     repo: SqlAlchemyRepository = Depends(get_repo),
 ) -> None:
-    project = await repo.get_owned_project(project_id, user.id)
+    project = await repo.get_owned_project_for_update(project_id, user.id)
     if project is None:
         raise _not_found()
+    if await repo.active_run_for_project(project_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A project with a non-terminal run cannot be deleted",
+        )
     container = request.app.state.container
     artifact_ids = await repo.list_artifact_ids_for_project(project_id)
     for artifact_id in artifact_ids:

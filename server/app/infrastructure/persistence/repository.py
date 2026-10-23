@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.domain.enums import (
     ACTIVE_STATUSES,
+    TERMINAL_STATUSES,
     ChatIntentAction,
     ChatRequestStatus,
     ConversationSender,
@@ -36,6 +37,7 @@ from app.infrastructure.persistence.models import (
     GraphEvent,
     GraphRun,
     Project,
+    RateLimitCounter,
     Review,
     Run,
     RunEvent,
@@ -664,6 +666,19 @@ class SqlAlchemyRepository:
         )
         return graph_runs
 
+    async def terminal_checkpoint_threads(self, cutoff: datetime) -> list[str]:
+        stmt = (
+            select(GraphRun.thread_id)
+            .join(Run, Run.id == GraphRun.run_id)
+            .where(
+                Run.status.in_(TERMINAL_STATUSES),
+                Run.updated_at < cutoff,
+                (Run.status != RunStatus.COMPLETED) | Run.archived.is_(True),
+            )
+            .order_by(GraphRun.created_at)
+        )
+        return list((await self.session.execute(stmt)).scalars())
+
     async def add_graph_run(self, run_id: uuid.UUID, round_number: int, thread_id: str) -> GraphRun:
         graph_run = GraphRun(run_id=run_id, round=round_number, thread_id=thread_id)
         self.session.add(graph_run)
@@ -731,6 +746,50 @@ class SqlAlchemyRepository:
             ).scalars()
         )
 
+    async def artifacts_for_run(self, run_id: uuid.UUID) -> list[Artifact]:
+        return list(
+            (
+                await self.session.execute(
+                    select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.file_path)
+                )
+            ).scalars()
+        )
+
+    async def completed_runs_to_archive(self, cutoff: datetime, limit: int = 50) -> list[Run]:
+        stmt = (
+            select(Run)
+            .where(
+                Run.status == RunStatus.COMPLETED,
+                Run.archived.is_(False),
+                Run.project_id.is_not(None),
+                Run.updated_at < cutoff,
+            )
+            .order_by(Run.updated_at)
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        )
+        return list((await self.session.execute(stmt)).scalars())
+
+    async def mark_run_archived(self, run_id: uuid.UUID) -> None:
+        await self.session.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status == RunStatus.COMPLETED)
+            .values(archived=True, updated_at=Run.updated_at)
+        )
+        await self.session.flush()
+
+    async def delete_expired_rate_limits(self, cutoff: datetime) -> int:
+        result = await self.session.execute(
+            delete(RateLimitCounter).where(RateLimitCounter.expires_at < cutoff)
+        )
+        return result.rowcount or 0
+
+    async def delete_stale_worker_heartbeats(self, cutoff: datetime) -> int:
+        result = await self.session.execute(
+            delete(WorkerHeartbeat).where(WorkerHeartbeat.last_seen_at < cutoff)
+        )
+        return result.rowcount or 0
+
     async def list_artifact_ids_for_project(self, project_id: uuid.UUID) -> list[uuid.UUID]:
         return list(
             (
@@ -743,6 +802,17 @@ class SqlAlchemyRepository:
         )
 
     async def delete_run(self, run_id: uuid.UUID) -> None:
+        run = await self.session.get(Run, run_id)
+        if run is None:
+            return
+        await self.session.execute(
+            update(Conversation)
+            .where(Conversation.active_feature_run_id == run_id)
+            .values(
+                active_feature_run_id=None,
+                context_version=Conversation.context_version + 1,
+            )
+        )
         await self.session.execute(delete(Run).where(Run.id == run_id))
         await self.session.commit()
 
@@ -805,6 +875,17 @@ class SqlAlchemyRepository:
             )
         ).scalar_one_or_none()
 
+    async def get_owned_project_for_update(
+        self, project_id: uuid.UUID, owner_id: uuid.UUID
+    ) -> Project | None:
+        return (
+            await self.session.execute(
+                select(Project)
+                .where(Project.id == project_id, Project.owner_id == owner_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
     async def create_project_context(
         self, owner_id: uuid.UUID, title: str, summary: str = ""
     ) -> ProjectContext:
@@ -843,6 +924,30 @@ class SqlAlchemyRepository:
         await self.session.commit()
 
     async def delete_project(self, project_id: uuid.UUID) -> None:
+        project_run_ids = set(
+            (
+                await self.session.execute(select(Run.id).where(Run.project_id == project_id))
+            ).scalars()
+        )
+        context_filter = Conversation.selected_project_id == project_id
+        if project_run_ids:
+            context_filter = or_(
+                context_filter, Conversation.active_feature_run_id.in_(project_run_ids)
+            )
+        conversations = list(
+            (
+                await self.session.execute(
+                    select(Conversation).where(context_filter).with_for_update()
+                )
+            ).scalars()
+        )
+        for conversation in conversations:
+            if conversation.selected_project_id == project_id:
+                conversation.selected_project_id = None
+                conversation.active_feature_run_id = None
+            if conversation.active_feature_run_id in project_run_ids:
+                conversation.active_feature_run_id = None
+            conversation.context_version += 1
         await self.session.execute(delete(Project).where(Project.id == project_id))
         await self.session.commit()
 
