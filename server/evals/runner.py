@@ -343,7 +343,14 @@ async def main() -> None:
         ),
     }
     payload = {
-        "metrics": metrics,
+        "fake_port_policy": {"sample_size": len(first_pass), "metrics": metrics},
+        "real_provider_quality": {
+            "status": "blocked",
+            "provider": "Azure OpenAI",
+            "sample_size": 0,
+            "first_pass_coupon_approval": None,
+            "reason": "No real-provider coupon sample was run; fake-port results are not quality evidence.",
+        },
         "scenarios": [result.__dict__ for result in results],
     }
     print(json.dumps(payload, indent=2))

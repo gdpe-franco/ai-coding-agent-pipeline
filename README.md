@@ -95,6 +95,9 @@ ruff check . && ruff format --check . && pytest
 python -m evals.runner
 ```
 
+Run the deterministic headless chat journey against the Compose app with
+`docker compose --profile e2e run --rm browser`; it uses mocked API responses and does not call a model.
+
 Run the SPA with `npm ci && npm run dev` from `client/`; Vite proxies `/api` to port 8000. See the
 [serving contract](docs/architecture.md#92-serving-and-topology).
 

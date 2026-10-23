@@ -21,6 +21,8 @@ data/
 # Build outputs
 client/dist/
 client/node_modules/
+client/playwright-report/
+client/test-results/
 *.tsbuildinfo
 server/dist/
 

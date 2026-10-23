@@ -46,6 +46,19 @@ services:
     volumes:
       - appdata:/app/data
 
+  browser:
+    image: mcr.microsoft.com/playwright:v1.55.1-noble
+    profiles: [e2e]
+    working_dir: /work
+    command: ["sh", "-lc", "npm ci && npm run test:e2e"]
+    environment:
+      PLAYWRIGHT_BASE_URL: http://app:8000
+    volumes:
+      - ./client:/work
+    depends_on:
+      app:
+        condition: service_healthy
+
   plantuml:
     image: plantuml/plantuml-server:jetty
     profiles: [docs]

@@ -1060,18 +1060,20 @@ the worker with `python -m app.worker`, and runs Vite from `client/`.
   uses a new graph thread.
 - One headless Playwright scenario uses the same chat for initial prompt → menu → new project → plan → generate
   → review → preview/handoff → normal follow-up → menu-confirmed switch → return to the older project. Reload
-  preserves chat/context, and replies remain associated with the correct runs. A broad browser matrix is deferred.
+  preserves chat/context, and replies remain associated with the correct runs. Run it against the Compose app
+  with `docker compose --profile e2e run --rm browser`; API responses are deterministic fakes. A broad browser
+  matrix is deferred.
 
 ### 11.2 Evaluation harness
 
 A local dataset and runner under `server/evals/` measure whether changes improve the product without LangSmith.
 
-- Scenarios: coupon validation, Flappy Bird, follow-up file preservation, manual context selection,
-  switch-intent detection, handoff/resume, malformed output, missing credentials, ownership isolation,
+- The combined pytest/evaluation gate covers coupon validation, Flappy Bird, follow-up file preservation,
+  manual context selection, switch-intent detection, handoff/resume, malformed output, missing credentials,
   rate limits, worker restart recovery, and retention/cleanup.
-- The runner uses fake ports by default; an optional real-provider smoke run exercises the configured Azure
-  deployment.
-- Reports first-pass approval rate, check pass/fail, handoff correctness, switch-intent detection accuracy,
+- The runner uses fake ports by default and labels those policy metrics separately from real-provider quality.
+  Without a real-provider sample, quality is explicitly `blocked`; fake-port results never count toward it.
+- Reports sample size and first-pass approval rate, check pass/fail, handoff correctness, switch-intent detection accuracy,
   manual-selection enforcement, artifact checksum integrity, file preservation, and ownership results.
 - Measure the PRD's first-pass target using real-provider coupon runs: first-round approval after exactly one
   Coder generation divided by all executed coupon cases, including failures. Report sample size and provider
@@ -1081,8 +1083,10 @@ A local dataset and runner under `server/evals/` measure whether changes improve
 ### 11.3 Verification evidence
 
 Retain test/evaluation reports and the browser scenario result for the PRD acceptance review. Report real-provider
-checks separately from deterministic fixtures, with any blocked dependency stated explicitly. The demonstration
-procedure is in §14; product acceptance criteria remain in the PRD.
+checks separately from deterministic fixtures, with any blocked dependency stated explicitly. The standard
+verification gate uses `pytest`, `python -m evals.runner`, and the Playwright command in §11.1; browser API
+responses are mocked, and no real-provider quality result is inferred from them. The demonstration procedure is
+in §14; product acceptance criteria remain in the PRD.
 
 ## 12. Risks and mitigations
 
