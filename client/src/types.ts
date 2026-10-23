@@ -6,6 +6,7 @@ export interface Project {
   title: string;
   summary: string;
   preview_id: string;
+  preview_ready: boolean;
   status: string;
   created_at: string;
   updated_at: string;
@@ -78,6 +79,8 @@ export interface Run {
   checks: CheckReport | null;
   chat_reply: string | null;
   error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface RunEvent {

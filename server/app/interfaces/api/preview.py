@@ -22,7 +22,7 @@ async def preview(
 ) -> Response:
     repo = SqlAlchemyRepository(session)
     project = await repo.get_project_by_preview(preview_id)
-    if project is None:
+    if project is None or not project.preview_ready:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     relative = path or "index.html"
     try:

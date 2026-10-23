@@ -50,6 +50,7 @@ python -m evals.runner
 ## Workflow guardrails
 
 - One owner-scoped chat per project; users switch projects by switching chats. A chat's project binding is immutable. The first message atomically creates its project, chat, message, and run. No project-routing or selection agents/menus.
+- The initial Planner may suggest a concise project/chat title; apply it only to the initial run and only until the user manually renames the chat.
 - Runs belong to chats; project identity is derived through the chat. Messages and generic ordered run events retain history. Enforce idempotency for chat creation and message submission; locks/heartbeats enable recovery.
 - Coding-run model/schema errors are recorded in run events and transition the run to `failed`, without model-error retry.
 - Graph order: planner → coder → reviewer. At most three Coder generations per execution; keep the retry counter in validated checkpoint state, not relational columns. No human input mid-execution. Third rejection or valid `escalate` yields `awaiting_user`, preserving files, issues, and execution history.
@@ -61,6 +62,6 @@ python -m evals.runner
 - PostgreSQL 17; Alembic creates app tables, never `create_all`. Fixed value sets use native PG ENUMs mirrored by `StrEnum`. Before production, keep one canonical initial migration and reset local DBs when it changes; afterward use additive, data-preserving migrations.
 - LangGraph owns its checkpoint/store tables and Psycopg 3 lifecycle via `setup()`; never pass the SQLAlchemy `postgresql+asyncpg` URL to its saver.
 - Workspace: latest `data/projects/{project_id}/`, snapshots `data/artifacts/{id}/`, preview `data/preview/{project_id}/`, archive `data/archived/{project_id}/{run_id}/`. Writes use temp file + `os.replace`, restricted to plan paths. Coder emits complete files; non-plan files remain byte-for-byte unchanged.
-- Preview serves copied static files on a separate origin at `/preview/{preview_id}/`, using an unguessable capability. No iframe top-navigation or server execution of generated JS. Rate limiting is PostgreSQL-backed; trust forwarded IPs only from `TRUSTED_PROXY_CIDRS`.
+- Preview serves copied static files on a separate origin at `/preview/{preview_id}/`, using an unguessable capability opened in a new tab. Generated JavaScript is never executed by the server. Rate limiting is PostgreSQL-backed; trust forwarded IPs only from `TRUSTED_PROXY_CIDRS`.
 - `.env` is ignored; `.env.example` contains placeholders only. Never commit secrets; setting names are in TDD §9.3.
 - PlantUML fences use `puml`; Graphviz-dependent diagrams start with `!pragma layout smetana` inside `@startuml`. Do not recreate `docs/plantuml.md`, add tracking/milestone docs, or introduce decision/requirement IDs into the TDD. `.vscode/settings.json` is ignored.

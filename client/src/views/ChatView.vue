@@ -10,26 +10,38 @@ const chat = ref<Chat | null>(null);
 const messages = ref<ChatMessage[]>([]);
 const events = ref<Record<string, RunEvent[]>>({});
 const draft = ref("");
-const titleDraft = ref("");
 const loading = ref(false);
 const sending = ref(false);
-const savingTitle = ref(false);
-const editingTitle = ref(false);
 const error = ref("");
 let pollTimer: number | undefined;
 let refreshPromise: Promise<void> | undefined;
 let pendingSubmission: { content: string; key: string } | null = null;
 
 const chatId = computed(() => String(route.params.id));
+const latestRunMessageIds = computed(() => {
+  const latest = new Map<string, string>();
+  for (const message of messages.value) {
+    if (message.role === "user" && message.run_id) latest.set(message.run_id, message.id);
+  }
+  return latest;
+});
+const stages: Record<string, string> = {
+  planner: "Planning the changes",
+  coder: "Updating the files",
+  reviewer: "Checking the result",
+};
 
 function latestActivity(runId: string): string {
   const latest = events.value[runId]?.at(-1);
-  if (!latest) return "Preparing the run…";
+  if (!latest || latest.kind === "run_queued") return "Waiting to start";
+  if (latest.kind === "execution_started") return "Starting work";
   const stepKey = latest.payload.step_key;
   if (typeof stepKey === "string") {
-    return `${latest.kind === "step_completed" ? "Finished" : "Working on"} ${stepKey}`;
+    const stage = stages[stepKey] ?? "Working on your request";
+    return latest.kind === "step_completed" ? `${stage} complete` : `${stage}…`;
   }
-  return latest.kind.replaceAll("_", " ");
+  if (latest.kind === "artifact_published") return "Preparing your approved preview";
+  return "Working on your request";
 }
 
 function isActive(status: RunStatus | null): boolean {
@@ -47,7 +59,9 @@ async function refresh(): Promise<void> {
         request<ChatMessage[]>(`/chats/${currentId}/messages`),
       ]);
       if (currentId !== chatId.value) return;
+      const sidebarTitleChanged = chat.value === null || chat.value.title !== latestChat.title;
       chat.value = latestChat;
+      if (sidebarTitleChanged) window.dispatchEvent(new Event("chats-updated"));
       messages.value = latestMessages;
       const activeRunIds = [
         ...new Set(
@@ -99,24 +113,6 @@ async function send() {
   }
 }
 
-async function renameChat() {
-  if (!chat.value || !titleDraft.value.trim() || savingTitle.value) return;
-  savingTitle.value = true;
-  error.value = "";
-  try {
-    chat.value = await request<Chat>(`/chats/${chatId.value}`, {
-      method: "PATCH",
-      body: JSON.stringify({ title: titleDraft.value.trim() }),
-    });
-    editingTitle.value = false;
-    window.dispatchEvent(new Event("chats-updated"));
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "Could not rename this chat";
-  } finally {
-    savingTitle.value = false;
-  }
-}
-
 watch(chatId, async () => {
   chat.value = null;
   messages.value = [];
@@ -140,22 +136,8 @@ onUnmounted(() => {
     <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
       <div>
         <h1 class="text-xl font-semibold">{{ chat?.title ?? "Project chat" }}</h1>
-        <p class="mt-1 text-xs text-slate-500">This chat always works on its own project.</p>
-        <form v-if="editingTitle" class="mt-2 flex gap-2" @submit.prevent="renameChat">
-          <label :for="`chat-title-${chatId}`" class="sr-only">Chat title</label>
-          <input :id="`chat-title-${chatId}`" v-model="titleDraft" class="input max-w-xs" maxlength="200" required />
-          <button class="btn-secondary" type="submit" :disabled="savingTitle">Save</button>
-          <button class="text-sm text-slate-400" type="button" @click="editingTitle = false">Cancel</button>
-        </form>
       </div>
       <div class="flex gap-2">
-        <button
-          class="btn-secondary text-sm"
-          type="button"
-          @click="titleDraft = chat?.title ?? ''; editingTitle = true"
-        >
-          Rename
-        </button>
         <RouterLink
           v-if="chat"
           class="btn-secondary text-sm"
@@ -178,10 +160,16 @@ onUnmounted(() => {
         :aria-label="message.role === 'user' ? 'Your message' : 'Assistant message'"
       >
         <p class="whitespace-pre-wrap text-sm leading-6">{{ message.content }}</p>
-        <div v-if="message.run_id" class="mt-3 flex flex-wrap items-center gap-3 border-t border-slate-700 pt-3 text-xs">
+        <div
+          v-if="message.role === 'user' && message.run_id && latestRunMessageIds.get(message.run_id) === message.id"
+          class="mt-3 flex flex-wrap items-center gap-3 border-t border-slate-700 pt-3 text-xs"
+        >
           <span v-if="message.run_status" class="flex items-center gap-2 text-slate-400">
             <StatusBadge :status="message.run_status" />
-            <span v-if="isActive(message.run_status)" role="status">{{ latestActivity(message.run_id) }}</span>
+            <span v-if="isActive(message.run_status)" class="inline-flex items-center gap-2" role="status">
+              <span class="h-2 w-2 animate-pulse rounded-full bg-indigo-300" aria-hidden="true" />
+              {{ latestActivity(message.run_id) }}
+            </span>
           </span>
           <RouterLink class="text-indigo-300 hover:text-indigo-200" :to="`/runs/${message.run_id}`">
             View details

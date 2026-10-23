@@ -51,6 +51,8 @@ def _run_read(run: Run) -> RunRead:
         checks=run.checks,
         chat_reply=run.chat_reply,
         error=run.error,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
     )
 
 
@@ -84,7 +86,7 @@ async def create_chat(
 ) -> ChatCreated:
     try:
         chat, project, run, created = await repo.create_chat(
-            user.id, idempotency_key, idempotency_key, payload.message
+            user.id, idempotency_key, payload.message
         )
     except RunConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.application.processor import RunProcessor
 from app.domain.enums import RunStatus
-from app.infrastructure.persistence.models import Artifact, ChatMessage, Run
+from app.infrastructure.persistence.models import Artifact, ChatMessage, Project, Run
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from tests.conftest import create_test_chat, create_test_user
 
@@ -107,6 +107,7 @@ async def test_processor_finalizes_run_in_its_chat_and_publishes_approved_files(
 
     async with session_factory() as session:
         saved = await session.get(Run, running.id)
+        saved_project = await session.get(Project, project.id)
         messages = list(
             (
                 await session.execute(
@@ -118,6 +119,7 @@ async def test_processor_finalizes_run_in_its_chat_and_publishes_approved_files(
         )
     assert saved.status == RunStatus.COMPLETED
     assert saved.chat_id == chat.id
+    assert saved_project.preview_ready is True
     assert workspace.published[0] == project.id
     assert memory.saved == (project.id, "Completed request: Build the app\nResult: reviewed")
     assert graph.states[0]["execution_id"] == str(running.execution_id)
@@ -128,7 +130,7 @@ async def test_processor_finalizes_run_in_its_chat_and_publishes_approved_files(
 
 
 async def test_processor_preserves_handoff_without_approval(session_factory, repo_factory) -> None:
-    _chat, _project, running = await _running_run(session_factory, "handoff@example.com")
+    _chat, project, running = await _running_run(session_factory, "handoff@example.com")
     memory = FakeMemory()
     processor = RunProcessor(
         repo_factory,
@@ -143,10 +145,12 @@ async def test_processor_preserves_handoff_without_approval(session_factory, rep
 
     async with session_factory() as session:
         saved = await session.get(Run, running.id)
+        saved_project = await session.get(Project, project.id)
     assert saved.status == RunStatus.AWAITING_USER
     assert saved.feedback["verdict"] == "escalate"
-    assert "needs your guidance" in saved.chat_reply
+    assert "need your guidance before I can finish" in saved.chat_reply
     assert not hasattr(memory, "saved")
+    assert saved_project.preview_ready is False
 
 
 async def test_continuation_keeps_artifacts_for_each_execution(
@@ -228,8 +232,8 @@ async def test_processor_records_failure_and_keeps_chat_message(
             ).scalars()
         )
     assert saved.status == RunStatus.FAILED
-    assert "provider unavailable" in saved.error
+    assert saved.error == "RuntimeError: internal_error"
     assert [message.content for message in messages] == [
         "Build the app",
-        "RuntimeError: provider unavailable",
+        "Something went wrong while working on this request. The run has stopped, and its technical details are available in run history.",
     ]

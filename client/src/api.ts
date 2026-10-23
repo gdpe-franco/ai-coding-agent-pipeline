@@ -54,6 +54,15 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return (await response.json()) as T;
 }
 
+export async function requestText(path: string): Promise<string> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}${path}`, { headers });
+  if (!response.ok) throw await parseError(response);
+  return response.text();
+}
+
 export async function login(email: string, password: string): Promise<string> {
   const body = new URLSearchParams({ username: email, password });
   const response = await fetch(`${API_BASE}/auth/login`, {

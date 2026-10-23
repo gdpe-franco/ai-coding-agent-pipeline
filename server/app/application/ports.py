@@ -98,6 +98,10 @@ class RunRepository(Protocol):
 
     async def add_plan(self, run_id: UUID, plan: Plan) -> None: ...
 
+    async def suggest_initial_chat_title(
+        self, owner_id: UUID, chat_id: UUID, run_id: UUID, title: str
+    ) -> bool: ...
+
     async def ensure_artifacts_for_run(
         self, run_id: UUID, execution_id: UUID, code: list[dict[str, Any]]
     ) -> dict[str, UUID]: ...
@@ -114,8 +118,6 @@ class RunRepository(Protocol):
         run_id: UUID | None = None,
         idempotency_key: UUID | None = None,
     ) -> ChatMessageContext: ...
-
-    async def update_project_summary(self, project_id: UUID, summary: str) -> None: ...
 
 
 class RepositoryFactory(Protocol):

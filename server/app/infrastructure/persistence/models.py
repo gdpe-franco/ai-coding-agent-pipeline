@@ -68,6 +68,9 @@ class Project(TimestampMixin, Base):
     status: Mapped[ProjectStatus] = mapped_column(
         _pg_enum(ProjectStatus, "project_status"), nullable=False, default=ProjectStatus.ACTIVE
     )
+    preview_ready: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
 
     owner: Mapped[User] = relationship(back_populates="projects")
     chat: Mapped[Chat | None] = relationship(back_populates="project", uselist=False)
@@ -84,6 +87,9 @@ class Chat(TimestampMixin, Base):
         unique=True,
     )
     creation_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, unique=True)
+    title_locked: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
 
     project: Mapped[Project] = relationship(back_populates="chat")
     messages: Mapped[list[ChatMessage]] = relationship(

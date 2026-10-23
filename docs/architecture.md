@@ -70,7 +70,7 @@ demo that shows an honest handoff.
 
 | Component | Responsibility |
 |---|---|
-| Frontend | Vue 3, TypeScript, Pinia, Tailwind, Vite. Collapsible chat sidebar; each chat shows one project, messages, run activity, history, files, review, and sandboxed preview. |
+| Frontend | Vue 3, TypeScript, Pinia, Tailwind, Vite. Collapsible chat sidebar; each chat shows one project, messages, run activity, history, and project files. Approved preview opens in a new tab. |
 | Backend | FastAPI under `/api/v1`; auth, chats, projects, runs, messages, run events, files, preview URL, health. Persists messages/runs atomically and enqueues work; never calls models or executes the graph in-request. |
 | Worker | Claims pending runs, executes Planner → Coder → Reviewer, writes files and generic run events, updates project memory, and finalizes the run. |
 | Database | PostgreSQL 17: application tables, durable run queue, rate-limit counters, LangGraph checkpoints, and the long-term memory store. |
@@ -161,8 +161,10 @@ end
 
 The sidebar lists a user's chats, ordered by recent activity. Each chat is bound to one project for its lifetime.
 **New chat** opens a draft composer; submitting the first message atomically creates the project, chat, message,
-and run. The chat title is derived from the project title and can be renamed. There is no project selector or
-project inference; choosing a different chat is the only way to change project context.
+and run. A temporary title is derived from the first message. The initial Planner response can suggest a concise
+2–6 word title in the user's language; no extra model call is made. A missing or unusable suggestion keeps the
+temporary title. User renames lock the title, so a late Planner response cannot overwrite them. There is no
+project selector or project inference; choosing a different chat is the only way to change project context.
 
 Every subsequent user message in the chat creates a run against its bound project. A run is one requested
 change; explicit guidance continues an `awaiting_user` run. No separate Feature entity is needed. Messages and
@@ -379,7 +381,7 @@ There is no mid-execution human input. An execution is unattended until `complet
 | `Code` | `id`, `run_id`, `file_path`, complete `content`, lowercase SHA-256 `checksum`, timestamp. |
 | `Feedback` | `verdict`, `summary`, `issues`, optional `suggested_code`, timestamp. |
 | `CheckReport` | `file_structure_ok`, `js_syntax_ok`, `files_checked`, `syntax_checked`, `issues`. |
-| `Chat` | UUID `id`, unique `project_id`, creation idempotency key, timestamps. Ownership is derived through the project; the binding is immutable. |
+| `Chat` | UUID `id`, unique `project_id`, creation idempotency key, `title_locked`, timestamps. Ownership is derived through the project; the binding is immutable. |
 | `ChatMessage` | UUID `id`, `chat_id`, optional `run_id`, ordered `sequence`, sender, content, idempotency key, timestamp. No routing state or project pointer. |
 | `RunState` | `id`, `chat_id`, request `message`, `status`, current plan/code/feedback/checks, current `execution_id`, latest guidance, worker lock/heartbeat, timestamps. Project is derived through chat. |
 | `RunEvent` | UUID, `run_id`, optional `execution_id`, ordered sequence, free-form event kind, JSON payload, timestamp; append-only and not agent-enum-bound. |
@@ -427,7 +429,7 @@ not relational columns or product concepts. The event stream records observable 
 
 | Agent | Input | Output and validation |
 |---|---|---|
-| Planner | `project_id` resolved from the run's chat, request, chat history, relevant project memory | `Plan`; Pydantic schema; UUID4 IDs; relative path with no leading `/`, `..`, or backslash and matching `^[A-Za-z0-9_\-./]+$`; allowlisted file type; 1–8 steps. |
+| Planner | `project_id` resolved from the run's chat, request, chat history, relevant project memory | `Plan` plus an optional-validity `suggested_project_title`; Pydantic schema. A title is applied only to the initial run and only before manual rename. Plan has UUID4 IDs, safe relative paths, allowlisted file types, and 1–8 steps. |
 | Coder | `project_id`, latest plan/step, complete `existing_files`, step index, project memory | `Code`; path must be in the current plan; application recomputes SHA-256; complete files only, written atomically; local asset references must be relative. |
 | Reviewer | project, plan, code list, `CheckReport`, relevant memory | `Feedback` with verdict `approve`, `reject`, or `escalate`; summary, issues, optional suggested code, timestamp; Pydantic validation. |
 
@@ -507,7 +509,7 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 | `GET` | `/api/v1/projects/{project_id}` | Project detail and summary | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/files` | List current files | Bearer + owner | `read` |
 | `GET` | `/api/v1/projects/{project_id}/files/{path}` | Read one file; path validated | Bearer + owner | `read` |
-| `GET` | `/api/v1/projects/{project_id}/preview-url` | Return the capability URL | Bearer + owner | `read` |
+| `GET` | `/api/v1/projects/{project_id}/preview-url` | Return the capability URL only after an approved run | Bearer + owner | `read` |
 | `GET` | `/api/v1/runs/{run_id}` | Run state and current outputs | Bearer + owner | `read` |
 | `GET` | `/api/v1/runs/{run_id}/events` | Ordered execution history; supports `after` sequence cursor | Bearer + owner | `read` |
 | `GET` | `/api/v1/runs/{run_id}/artifacts` | Saved file snapshots grouped by execution | Bearer + owner | `read` |
@@ -593,14 +595,13 @@ backend code. Preview runs on a different origin from the API/auth:
 - The same FastAPI process routes by Host; Cloudflare Tunnel exposes both hostnames.
 
 The preview URL is a bearer capability. Each project gets a random `preview_id` (UUID4) separate from the project
-UUID. `GET /api/v1/projects/{id}/preview-url` returns the URL to the owner; the preview route itself requires no
-JWT. Anyone holding the URL can view the generated static files — a deliberate trade-off that keeps iframe
-navigation and relative asset loading reliable without cookies or bearer headers.
+UUID. `GET /api/v1/projects/{id}/preview-url` returns the URL only after an approved result exists; the preview
+route itself requires no JWT. Anyone holding the URL can view the generated static files.
 
-Preview responses set `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`. The iframe uses
-`sandbox="allow-scripts allow-same-origin allow-forms allow-popups"` with no `allow-top-navigation`; the separate
-origin is essential because scripts and same-origin are both allowed. `allow-modals` is omitted, so `alert`,
-`confirm`, and `prompt` calls are suppressed inside the preview. Preview files must use relative local asset paths.
+The Project page opens the approved preview in a new tab with `rel="noopener noreferrer"`. Preview responses set
+`X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`; the separate origin isolates generated scripts from
+the authenticated application. Preview files must use relative local asset paths. The server never executes
+generated code; scripts execute only in the user's preview tab.
 `preview_id` is stable until the project is deleted. Rotation, signed previews, and containerized execution of
 generated apps are deferred.
 
@@ -634,12 +635,14 @@ entity projects {
   owner_id : UUID
   title : TEXT
   preview_id : UUID
+  preview_ready : BOOLEAN
 }
 entity chats {
   * id : UUID
   --
   project_id : UUID UNIQUE
   creation_key : UUID UNIQUE
+  title_locked : BOOLEAN
 }
 entity chat_messages {
   * id : UUID
@@ -700,9 +703,12 @@ runs ||--o{ artifacts : produces
 @enduml
 ```
 
-`chats.project_id` is unique and immutable. Chat ownership is derived through its project, avoiding duplicated
+`chats.project_id` is unique and immutable. `title_locked` records that the user explicitly renamed the chat,
+preventing a late Planner suggestion from overwriting it. Chat ownership is derived through its project, avoiding duplicated
 owner/project pointers. `runs.chat_id` is authoritative; run project identity is derived through the chat.
 Messages and runs are owner-scoped by joining `chats → projects → users`.
+`projects.preview_ready` is set only when an approved run publishes successfully; handoffs and failures leave the
+last approved preview unchanged. `GET /projects/{id}/preview-url` returns `404` until this flag is true.
 
 The first-chat creation key and per-chat message idempotency keys prevent duplicate resources on request retry.
 `run_events` has a unique `(run_id, sequence)` index; event `kind` and step/agent metadata live in data, not
@@ -877,7 +883,7 @@ the worker with `python -m app.worker`, and runs Vite from `client/`.
 | Complete-file generation with a plan-set guard | Reviewable output and deterministic protection of unrelated files. | More tokens than patch-based edits. |
 | Deterministic checks inside Reviewer | Establish file/type/syntax facts before LLM judgment without an extra agent. | Runtime Node is required; syntax checks do not prove app behavior. |
 | Bounded workflow generation and continuation | Bound unattended work and expose unresolved issues without false approval; guidance can change the plan. | Continuation repeats planning and generation. |
-| Separate-origin capability preview | Relative assets and iframe navigation work without JWT headers; generated scripts remain isolated from the app. | Anyone holding the URL can view the preview. |
+| Separate-origin capability preview | Full-page preview opens without JWT headers while generated scripts remain isolated from the app origin. | Anyone holding the URL can view the preview. |
 | Shared PostgreSQL rate limits | Consistent limits across API workers using the existing datastore. | A database round-trip per limited request; outages fail closed. |
 | JWT auth and owner-scoped access | Standard local identity integration; non-owned resources return `404`. | `fastapi-users` is in maintenance mode; enterprise identity is deferred. |
 | Atomic files on a persistent volume | Simple, inspectable latest files, artifacts, preview copies, and archives. | Tied to durable disk; ephemeral deployment requires another adapter. |
@@ -936,7 +942,7 @@ in §14; product acceptance criteria remain in the PRD.
 | A late reply is shown under the wrong request. | Keep run/message associations immutable, finalize the reply once transactionally, and display its originating run. |
 | Worker crash loses a run. | PostgreSQL checkpoints and heartbeat-based reclaim; terminal transitions idempotent. |
 | Cost or latency creep from retries. | Three-generation execution budget, `temperature=0` Reviewer, and the run cap; budget policy is the main open item. |
-| Preview exposes data. | Capability URL on a separate origin, `noindex`/`no-referrer`, sandboxed iframe without top-navigation, and no secrets in generated projects. |
+| Preview exposes data. | Capability URL on a separate origin, opened with `noopener noreferrer`, `noindex`/`no-referrer`, and no secrets in generated projects. |
 | Local demo machine offline. | Document the uptime dependency and verify stack/tunnel restart before assessment. |
 
 ## 13. Limits and open items

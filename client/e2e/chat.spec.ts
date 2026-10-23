@@ -19,6 +19,7 @@ test("project chats keep their runs, history, and context across switching and r
   const artifacts = new Map<string, Record<string, unknown>[]>();
   const runEvents = new Map<string, Record<string, unknown>[]>();
   const idempotentResponses = new Map<string, unknown>();
+  const titleSuggestions = new Map<string, string>();
   let chatNumber = 0;
   let runNumber = 0;
   let messageNumber = 0;
@@ -49,8 +50,8 @@ test("project chats keep their runs, history, and context across switching and r
     const executionId = `execution-${runNumber}-1`;
     const reply =
       status === "completed"
-        ? "Generated files passed review and are ready to preview."
-        : "The reviewer stopped with an honest handoff.";
+        ? "Your changes are ready.\n\nThe result looks good.\n\nI updated 1 file. File checks and required JavaScript syntax checks passed."
+        : "I’ve made the requested changes, but I need your guidance before I can finish.\n\nThe request needs clarification.\n\nI updated 1 file. Your last approved preview is unchanged.";
     const run = {
       id: runId,
       chat_id: chatId,
@@ -95,6 +96,8 @@ test("project chats keep their runs, history, and context across switching and r
       },
       chat_reply: reply,
       error: null,
+      created_at: "2026-10-23T12:00:00Z",
+      updated_at: "2026-10-23T12:00:00Z",
     };
     runs.set(runId, run);
     artifacts.set(runId, [
@@ -146,6 +149,14 @@ test("project chats keep their runs, history, and context across switching and r
       chats.set(chatId, { id: chatId, project_id: projectId, title, updated_at: "2026-10-23T12:00:00Z" });
       projects.set(projectId, { id: projectId, chat_id: chatId, title, preview_id: `preview-${chatId}` });
       messages.set(chatId, []);
+      titleSuggestions.set(
+        chatId,
+        body.message.toLowerCase().includes("coupon")
+          ? "Coupon validator"
+          : body.message.toLowerCase().includes("flappy")
+            ? "Flappy Bird"
+            : "New project",
+      );
       const run = createRun(chatId, body.message, "completed", key ?? "create-key");
       await reply({ chat_id: chatId, project_id: projectId, run_id: run.id }, 201);
     } else if (path.startsWith("/chats/") && path.endsWith("/messages") && method === "GET") {
@@ -183,6 +194,19 @@ test("project chats keep their runs, history, and context across switching and r
       await reply([...runs.values()].filter((run) => run.chat_id === chatId));
     } else if (path.startsWith("/chats/") && method === "GET") {
       const chat = chats.get(path.split("/")[2]);
+      const suggestedTitle = titleSuggestions.get(chat?.id ?? "");
+      if (chat && suggestedTitle) {
+        chat.title = suggestedTitle;
+        projects.get(chat.project_id)!.title = suggestedTitle;
+        titleSuggestions.delete(chat.id);
+      }
+      await reply(chat ?? { detail: "Not found" }, chat ? 200 : 404);
+    } else if (path.startsWith("/chats/") && method === "PATCH") {
+      const chat = chats.get(path.split("/")[2]);
+      if (chat) {
+        chat.title = (request.postDataJSON() as { title: string }).title;
+        projects.get(chat.project_id)!.title = chat.title;
+      }
       await reply(chat ?? { detail: "Not found" }, chat ? 200 : 404);
     } else if (/^\/runs\/[^/]+\/artifacts$/.test(path)) {
       await reply(artifacts.get(path.split("/")[2]) ?? []);
@@ -206,7 +230,7 @@ test("project chats keep their runs, history, and context across switching and r
       run.execution_id = `execution-${runId}-2`;
       run.user_guidance = body.guidance;
       run.status = "completed";
-      run.chat_reply = "Guidance applied and the run is complete.";
+      run.chat_reply = "Your changes are ready. Guidance has been applied and the run is complete.";
       artifacts.get(runId)?.push({
         id: `artifact-${runId}-2`,
         execution_id: run.execution_id,
@@ -235,7 +259,7 @@ test("project chats keep their runs, history, and context across switching and r
       const project = projects.get(path.split("/")[2]);
       await reply(
         project
-          ? { ...project, summary: "", status: "active", created_at: "2026-10-23T12:00:00Z", updated_at: "2026-10-23T12:00:00Z" }
+          ? { ...project, summary: "", preview_ready: true, status: "active", created_at: "2026-10-23T12:00:00Z", updated_at: "2026-10-23T12:00:00Z" }
           : { detail: "Not found" },
         project ? 200 : 404,
       );
@@ -243,7 +267,7 @@ test("project chats keep their runs, history, and context across switching and r
       await reply({ detail: `Unhandled browser-test request: ${method} ${path}` }, 404);
     }
   });
-  await page.route("https://preview.example.test/**", (route) =>
+  await page.context().route("https://preview.example.test/**", (route) =>
     route.fulfill({
       contentType: "text/html",
       body: "<!doctype html><html><body><h1>Generated preview</h1></body></html>",
@@ -257,35 +281,52 @@ test("project chats keep their runs, history, and context across switching and r
   await page.getByRole("button", { name: "New chat" }).last().click();
   await page.getByRole("textbox", { name: "Describe your project" }).fill("Build a coupon validator");
   await page.getByRole("button", { name: "Create project and start" }).click();
-  await expect(page.getByText("Generated files passed review and are ready to preview.")).toBeVisible();
+  await expect(page.getByText("Your changes are ready.", { exact: false }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Coupon validator" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Coupon validator" })).toBeVisible();
+  await page.getByRole("button", { name: "Options for Coupon validator" }).click();
+  await page.getByRole("menuitem", { name: "Rename chat" }).click();
+  await page.getByRole("textbox", { name: "Rename chat" }).fill("Coupon app");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("link", { name: "Coupon app" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Coupon app" })).toBeVisible();
 
   await page.getByRole("link", { name: "View details" }).first().click();
   await expect(page.getByText("index.html", { exact: true }).first()).toBeVisible();
-  await expect(
-    page.frameLocator('iframe[title="Generated app preview"]').getByRole("heading", {
-      name: "Generated preview",
-    }),
-  ).toBeVisible();
-  await page.getByRole("link", { name: "Build a coupon validator" }).click();
+  await expect(page.locator('iframe[title="Generated app preview"]')).toHaveCount(0);
+  await page.getByRole("link", { name: "Coupon app" }).click();
+  await page.getByRole("link", { name: "Project", exact: true }).click();
+  const [previewPage] = await Promise.all([
+    page.context().waitForEvent("page"),
+    page.getByRole("link", { name: "Open approved preview" }).click(),
+  ]);
+  await expect(previewPage.getByRole("heading", { name: "Generated preview" })).toBeVisible();
+  await previewPage.close();
+  await page.getByRole("link", { name: "Coupon app" }).click();
 
   await page.getByRole("textbox", { name: "Message" }).fill("Add a score counter");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Handoff — needs you").last()).toBeVisible();
   await page.getByRole("link", { name: "View details" }).last().click();
   await expect(
-    page.getByRole("heading", { name: "The reviewer stopped with an honest handoff" }),
+    page.getByRole("heading", { name: "This request needs your guidance" }),
   ).toBeVisible();
   await page.getByPlaceholder("What should change?").fill("Keep the layout and add the counter");
   await page.getByRole("button", { name: "Continue with guidance" }).click();
   await expect(page.getByText("Completed", { exact: true })).toBeVisible();
-  const savedFiles = page.locator("section.card").filter({ hasText: "Saved files by execution" });
-  await expect(savedFiles.getByRole("button", { name: "index.html" })).toHaveCount(2);
+  const savedExecution = page.getByLabel("Saved execution");
+  await expect(savedExecution.locator("option")).toHaveCount(3);
+  await savedExecution.selectOption({ label: "Execution 1" });
+  await expect(
+    page.getByRole("region", { name: "Files" }).getByRole("button", { name: "index.html" }),
+  ).toHaveCount(1);
+  await savedExecution.selectOption({ label: "Execution 2" });
 
   await page.getByRole("button", { name: "New chat" }).last().click();
   await page.getByRole("textbox", { name: "Describe your project" }).fill("Build Flappy Bird");
   await page.getByRole("button", { name: "Create project and start" }).click();
-  await expect(page.getByText("Generated files passed review and are ready to preview.")).toBeVisible();
-  await page.getByRole("link", { name: "Build a coupon validator" }).click();
+  await expect(page.getByText("Your changes are ready.", { exact: false }).last()).toBeVisible();
+  await page.getByRole("link", { name: "Coupon app" }).click();
   await page.getByRole("textbox", { name: "Message" }).fill("Add a high-score display");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Add a high-score display")).toBeVisible();
@@ -296,8 +337,9 @@ test("project chats keep their runs, history, and context across switching and r
   await expect(page.getByText("Keep the layout and add the counter")).toBeVisible();
   await expect(page.getByText("Add a high-score display")).toBeVisible();
   await page.getByRole("link", { name: "Project", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Build a coupon validator" })).toBeVisible();
-
+  await expect(page.getByRole("heading", { name: "Coupon app" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open approved preview" })).toBeVisible();
+  await page.getByRole("link", { name: "Coupon app" }).click();
   await page.getByRole("link", { name: "Run history" }).click();
   await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Runs" }).getByRole("listitem")).toHaveCount(3);

@@ -19,7 +19,7 @@ from app.domain.enums import (
     RunStatus,
 )
 from app.domain.errors import RunConflictError
-from app.domain.models import Plan, ProjectContext, RunState
+from app.domain.models import Plan, ProjectContext, RunState, initial_chat_title
 from app.domain.policies import can_continue
 from app.domain.serialization import plan_payload
 from app.infrastructure.persistence.models import (
@@ -36,11 +36,6 @@ from app.infrastructure.persistence.models import (
 
 def _now() -> datetime:
     return datetime.now(UTC)
-
-
-def _chat_title(message: str) -> str:
-    title = " ".join(message.split())
-    return title[:80] or "New chat"
 
 
 def _run_state(run: Run) -> RunState:
@@ -96,7 +91,6 @@ class SqlAlchemyRepository:
         self,
         owner_id: uuid.UUID,
         creation_key: uuid.UUID,
-        message_key: uuid.UUID,
         content: str,
     ) -> tuple[Chat, Project, Run, bool]:
         creation_key = uuid.uuid5(uuid.NAMESPACE_URL, f"chat-create:{owner_id}:{creation_key}")
@@ -107,7 +101,7 @@ class SqlAlchemyRepository:
                 raise RunConflictError("Idempotency-Key was already used for a different request")
             return chat, project, run, False
 
-        project = Project(owner_id=owner_id, title=_chat_title(content), summary="")
+        project = Project(owner_id=owner_id, title=initial_chat_title(content), summary="")
         self.session.add(project)
         await self.session.flush()
         inserted = await self.session.execute(
@@ -127,7 +121,7 @@ class SqlAlchemyRepository:
             return (*existing, False)
         chat = await self.session.get(Chat, chat_id)
         assert chat is not None
-        message = await self._new_message(chat.id, MessageSender.USER, content, message_key)
+        message = await self._new_message(chat.id, MessageSender.USER, content, creation_key)
         run = Run(chat_id=chat.id, message=content)
         self.session.add(run)
         await self.session.flush()
@@ -354,7 +348,7 @@ class SqlAlchemyRepository:
             return None
         if run.status != RunStatus.AWAITING_USER:
             raise RunConflictError("Only awaiting_user runs can be closed")
-        reply = "Run closed by the user. The generated files and unresolved issues are preserved."
+        reply = "You closed this run. Its saved files and open questions remain in run history."
         run.status = RunStatus.FAILED
         run.chat_reply = reply
         run.locked_by = None
@@ -385,10 +379,14 @@ class SqlAlchemyRepository:
         reply: str,
         event_kind: EventKind | str,
         event_payload: dict[str, Any],
+        project_summary: str | None = None,
         **fields: Any,
     ) -> bool:
         run = await self.session.scalar(
-            select(Run).options(selectinload(Run.chat)).where(Run.id == run_id).with_for_update()
+            select(Run)
+            .options(selectinload(Run.chat).selectinload(Chat.project))
+            .where(Run.id == run_id)
+            .with_for_update()
         )
         if run is None or run.status != RunStatus.RUNNING:
             return False
@@ -396,6 +394,10 @@ class SqlAlchemyRepository:
             setattr(run, name, value)
         run.status = status
         run.chat_reply = reply
+        if status == RunStatus.COMPLETED:
+            run.chat.project.preview_ready = True
+            if project_summary is not None:
+                run.chat.project.summary = project_summary
         await self._append_event(run, event_kind, event_payload)
         key = uuid.uuid5(
             uuid.NAMESPACE_URL,
@@ -548,9 +550,38 @@ class SqlAlchemyRepository:
         if chat is None:
             return None
         chat.project.title = title
+        chat.title_locked = True
         chat.updated_at = _now()
         await self.session.commit()
         return chat
+
+    async def suggest_initial_chat_title(
+        self,
+        owner_id: uuid.UUID,
+        chat_id: uuid.UUID,
+        run_id: uuid.UUID,
+        title: str,
+    ) -> bool:
+        chat = await self._owned_chat_for_update(owner_id, chat_id)
+        if chat is None or chat.title_locked:
+            return False
+        first_message = await self.session.scalar(
+            select(ChatMessage).where(
+                ChatMessage.chat_id == chat_id,
+                ChatMessage.idempotency_key == chat.creation_key,
+            )
+        )
+        if first_message is None or first_message.run_id != run_id:
+            return False
+        run = await self.session.scalar(select(Run).where(Run.id == run_id, Run.chat_id == chat_id))
+        if run is None or run.user_guidance is not None:
+            return False
+        if chat.project.title != initial_chat_title(first_message.content):
+            return False
+        chat.project.title = title
+        chat.updated_at = _now()
+        await self.session.flush()
+        return True
 
     async def delete_chat(self, owner_id: uuid.UUID, chat_id: uuid.UUID) -> uuid.UUID | None:
         chat = await self._owned_chat_for_update(owner_id, chat_id)
@@ -713,12 +744,6 @@ class SqlAlchemyRepository:
                 )
             ).scalars()
         )
-
-    async def update_project_summary(self, project_id: uuid.UUID, summary: str) -> None:
-        await self.session.execute(
-            update(Project).where(Project.id == project_id).values(summary=summary)
-        )
-        await self.session.commit()
 
     async def list_artifact_ids_for_project(self, project_id: uuid.UUID) -> list[uuid.UUID]:
         return list(

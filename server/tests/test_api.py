@@ -371,6 +371,9 @@ def test_preview_url_and_preview_route(client: TestClient, settings: Settings) -
     project = client.get(
         f"/api/v1/projects/{created.json()['project_id']}", headers=auth_headers(token)
     ).json()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE projects SET preview_ready=true WHERE id=%s", (project["id"],))
+        connection.commit()
     preview_file = settings.data_dir / "preview" / project["id"] / "index.html"
     preview_file.parent.mkdir(parents=True)
     preview_file.write_text("<h1>Approved</h1>", encoding="utf-8")
@@ -380,6 +383,21 @@ def test_preview_url_and_preview_route(client: TestClient, settings: Settings) -
     response = client.get(f"/preview/{project['preview_id']}/index.html")
     assert url.endswith(f"/preview/{project['preview_id']}/")
     assert response.text == "<h1>Approved</h1>"
+
+
+def test_preview_url_is_not_issued_before_an_approved_run(client: TestClient) -> None:
+    token = register_and_login(client, "no-preview@example.com")
+    created, _ = _create_chat(client, token, "Build an app")
+    project_id = created.json()["project_id"]
+    project = client.get(f"/api/v1/projects/{project_id}", headers=auth_headers(token)).json()
+    assert project["preview_ready"] is False
+    assert (
+        client.get(
+            f"/api/v1/projects/{project_id}/preview-url", headers=auth_headers(token)
+        ).status_code
+        == 404
+    )
+    assert client.get(f"/preview/{project['preview_id']}/index.html").status_code == 404
 
 
 def test_rate_limiter_returns_429(tmp_path) -> None:

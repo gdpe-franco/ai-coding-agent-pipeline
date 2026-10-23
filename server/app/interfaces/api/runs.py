@@ -39,6 +39,8 @@ def _run_read(run: Run) -> RunRead:
         checks=run.checks,
         chat_reply=run.chat_reply,
         error=run.error,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
     )
 
 

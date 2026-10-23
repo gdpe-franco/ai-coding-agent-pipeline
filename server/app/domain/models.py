@@ -110,6 +110,11 @@ def validate_relative_path(path: str) -> str:
     return path
 
 
+def initial_chat_title(message: str) -> str:
+    title = " ".join(message.split())
+    return title[:80] or "New chat"
+
+
 def validate_file_type(file_type: str) -> str:
     value = file_type.lower()
     if value not in ALLOWED_FILE_TYPES:
@@ -131,6 +136,7 @@ __all__ = [
     "ReviewerVerdict",
     "RunState",
     "RunStatus",
+    "initial_chat_title",
     "validate_file_type",
     "validate_relative_path",
 ]

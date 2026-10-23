@@ -24,7 +24,9 @@ def planner_messages(
                 "the request. Each step is one complete file. Use only html, css, js, md, json, svg, "
                 "png, or ico. Paths must be relative, use forward slashes, and contain no '..'. "
                 "Keep the app self-contained with relative local asset paths. Prefer a working "
-                "single-page result over unnecessary files."
+                "single-page result over unnecessary files. Also suggest a concise 2–6 word project "
+                "title in the user's language. Name the overall app/project, not just this change; "
+                "return null if no useful title is clear."
             ),
         },
         {

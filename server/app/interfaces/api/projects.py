@@ -29,6 +29,7 @@ def _project_read(project: Project) -> ProjectRead:
         title=project.title,
         summary=project.summary,
         preview_id=project.preview_id,
+        preview_ready=project.preview_ready,
         status=project.status.value,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -125,6 +126,8 @@ async def preview_url(
 ) -> PreviewUrlRead:
     project = await repo.get_owned_project(project_id, user.id)
     if project is None:
+        raise _not_found()
+    if not project.preview_ready:
         raise _not_found()
     settings = request.app.state.container.settings
     base = settings.preview_host.rstrip("/")

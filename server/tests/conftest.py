@@ -129,4 +129,4 @@ async def create_test_user(session: AsyncSession, email: str) -> User:
 
 
 async def create_test_chat(session: AsyncSession, owner_id, message: str = "Build a project"):
-    return await SqlAlchemyRepository(session).create_chat(owner_id, uuid4(), uuid4(), message)
+    return await SqlAlchemyRepository(session).create_chat(owner_id, uuid4(), message)

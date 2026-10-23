@@ -32,6 +32,7 @@ class FakeRepo:
     plans: dict[UUID, Plan] = field(default_factory=dict)
     runs: dict[UUID, dict] = field(default_factory=dict)
     messages: dict[UUID, list[FakeMessage]] = field(default_factory=dict)
+    suggested_titles: list[str] = field(default_factory=list)
 
     async def __aenter__(self) -> Self:
         return self
@@ -58,6 +59,10 @@ class FakeRepo:
 
     async def add_plan(self, run_id: UUID, plan: Plan) -> None:
         self.plans[run_id] = plan
+
+    async def suggest_initial_chat_title(self, owner_id, chat_id, run_id, title) -> bool:
+        self.suggested_titles.append(title)
+        return True
 
 
 class FakeWorkspace:
@@ -98,9 +103,14 @@ class ScriptedLLM:
         return self.replies.pop(0)
 
 
-def planner_reply(path: str = "index.html", file_type: str = "html") -> dict:
+def planner_reply(
+    path: str = "index.html",
+    file_type: str = "html",
+    suggested_title: str | None = "Coupon validator",
+) -> dict:
     return {
         "summary": "one page",
+        "suggested_project_title": suggested_title,
         "steps": [
             {
                 "name": "page",
@@ -164,6 +174,20 @@ async def test_execution_uses_only_its_chat_and_completes_review() -> None:
     assert workspace.files == {"index.html": "<h1>ok</h1>"}
     assert "selected chat history" in clients["planner"].messages[0][1]["content"]
     assert "private other-chat history" not in clients["planner"].messages[0][1]["content"]
+    assert repo.suggested_titles == ["Coupon validator"]
+
+
+async def test_unusable_project_title_falls_back_without_failing_the_plan() -> None:
+    graph, repo, _, _ = make_graph(
+        planner=[planner_reply(suggested_title="App")],
+        coder=[{"file_path": "index.html", "content": "<h1>ok</h1>"}],
+        reviewer=[{"verdict": "approve", "summary": "good", "issues": []}],
+    )
+
+    result = await graph.ainvoke(base_state(), {})
+
+    assert result["approved"] is True
+    assert repo.suggested_titles == []
     assert [event[1] for event in repo.events] == [
         EventKind.STEP_STARTED.value,
         EventKind.STEP_COMPLETED.value,

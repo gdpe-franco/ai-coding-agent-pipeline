@@ -15,6 +15,7 @@ class ProjectRead(BaseModel):
     title: str
     summary: str
     preview_id: UUID
+    preview_ready: bool
     status: str
     created_at: datetime
     updated_at: datetime
@@ -81,6 +82,8 @@ class RunRead(BaseModel):
     checks: dict[str, Any] | None = None
     chat_reply: str | None = None
     error: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ContinuationRequest(BaseModel):

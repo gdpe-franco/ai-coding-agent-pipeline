@@ -8,6 +8,7 @@ from uuid import UUID
 from app.application.graph import CodingGraph
 from app.application.ports import RepositoryFactory
 from app.domain.enums import EventKind, RunStatus
+from app.domain.errors import MissingCredentialsError, ModelError, WorkspaceError
 from app.domain.models import RunState
 
 logger = logging.getLogger(__name__)
@@ -118,18 +119,25 @@ class RunProcessor:
 
             feedback = result.get("feedback") or {}
             summary = feedback.get("summary") or "Run finished."
+            file_count = len(code)
+            file_count_label = f"{file_count} {'file' if file_count == 1 else 'files'}"
             if approved:
                 status = RunStatus.COMPLETED
-                reply = f"Approved. Generated {len(files)} files. {summary}"
+                reply = (
+                    f"Your changes are ready.\n\n{summary}\n\n"
+                    f"I updated {file_count_label}. File checks and required JavaScript syntax checks passed."
+                )
                 event_kind = EventKind.RUN_COMPLETED
                 event_payload = {"summary": summary, "files": len(files)}
                 await self.memory.save_project_memory(
                     project_id, f"Completed request: {run.message}\nResult: {summary}"[:4000]
                 )
-                await repo.update_project_summary(project_id, summary[:2000])
             elif handoff:
                 status = RunStatus.AWAITING_USER
-                reply = f"This run needs your guidance. {summary}"
+                reply = (
+                    f"I’ve made the requested changes, but I need your guidance before I can finish.\n\n"
+                    f"{summary}\n\nI updated {file_count_label}. Your last approved preview is unchanged."
+                )
                 event_kind = EventKind.HANDOFF
                 event_payload = {"summary": summary, "issues": feedback.get("issues", [])}
             else:
@@ -146,6 +154,7 @@ class RunProcessor:
                 reply,
                 event_kind,
                 event_payload,
+                project_summary=summary[:2000] if approved else None,
                 plan=result.get("plan"),
                 latest_code=code,
                 feedback=feedback,
@@ -158,23 +167,56 @@ class RunProcessor:
             run = await repo.get_run(run_id)
             if run is None or run.status != RunStatus.RUNNING:
                 return
+            diagnostic = (
+                str(exc)
+                if isinstance(exc, MissingCredentialsError)
+                else f"{type(exc).__name__}: {getattr(exc, 'tag', 'internal_error')}"
+            )
             await self._mark_failed(
                 repo,
                 run,
-                f"{type(exc).__name__}: {exc}"[:2000],
+                self._failure_reply(exc),
                 tag=getattr(exc, "tag", "internal_error"),
+                diagnostic=diagnostic,
             )
 
+    @staticmethod
+    def _failure_reply(exc: Exception) -> str:
+        if isinstance(exc, MissingCredentialsError):
+            return (
+                f"I couldn’t start this run because the operator configuration is missing `"
+                f"{exc.setting}`. Please contact the service operator."
+            )
+        if isinstance(exc, ModelError):
+            return (
+                "The AI service couldn’t complete this request. Your run history is saved; "
+                "you can try again or start another request."
+            )
+        if isinstance(exc, WorkspaceError):
+            return (
+                "The generated files couldn’t be saved safely. The run has stopped; "
+                "your last approved preview is unchanged."
+            )
+        return (
+            "Something went wrong while working on this request. The run has stopped, "
+            "and its technical details are available in run history."
+        )
+
     async def _mark_failed(
-        self, repo, run: RunState, message: str, tag: str = "internal_error"
+        self,
+        repo,
+        run: RunState,
+        message: str,
+        tag: str = "internal_error",
+        diagnostic: str | None = None,
     ) -> None:
         await repo.finalize_run(
             run.id,
             RunStatus.FAILED,
             message,
             EventKind.RUN_FAILED,
-            {"tag": tag, "message": message[:2000]},
-            error=message[:2000],
+            {"tag": tag, "message": (diagnostic or message)[:2000]},
+            error=(diagnostic or message)[:2000],
         )
 
 

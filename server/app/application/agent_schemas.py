@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.enums import FileType
 from app.domain.models import validate_relative_path
@@ -27,6 +27,21 @@ class PlannerStep(StrictModel):
 class PlannerResponse(StrictModel):
     summary: str = Field(min_length=1, max_length=2000)
     steps: list[PlannerStep] = Field(min_length=1, max_length=8)
+    suggested_project_title: str | None = Field(
+        ..., description="A concise 2–6 word project name in the user's language, or null."
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_missing_title(cls, value):
+        if isinstance(value, dict):
+            value = dict(value)
+            title = value.get("suggested_project_title")
+            if title is not None and not isinstance(title, str):
+                value["suggested_project_title"] = None
+            else:
+                value.setdefault("suggested_project_title", None)
+        return value
 
 
 class CoderResponse(StrictModel):
@@ -37,6 +52,13 @@ class CoderResponse(StrictModel):
     @classmethod
     def valid_path(cls, value: str) -> str:
         return validate_relative_path(value)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def strip_null_bytes(cls, value: object) -> object:
+        if isinstance(value, str) and "\x00" in value:
+            return value.replace("\x00", "")
+        return value
 
 
 class ReviewerIssue(StrictModel):

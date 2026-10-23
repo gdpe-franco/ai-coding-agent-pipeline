@@ -10,6 +10,10 @@ const router = useRouter();
 const route = useRoute();
 const chats = ref<Chat[]>([]);
 const sidebarError = ref("");
+const openMenuChatId = ref<string | null>(null);
+const renameChatId = ref<string | null>(null);
+const renameTitle = ref("");
+const renameError = ref("");
 
 async function loadChats() {
   if (!auth.authenticated) {
@@ -29,21 +33,52 @@ async function startNewChat() {
   await router.push("/new-chat");
 }
 
-function reloadChats() {
+function chatsUpdated() {
   void loadChats();
 }
 
+function beginRename(chat: Chat) {
+  renameChatId.value = chat.id;
+  renameTitle.value = chat.title;
+  renameError.value = "";
+  openMenuChatId.value = null;
+}
+
+function cancelRename() {
+  renameChatId.value = null;
+  renameTitle.value = "";
+  renameError.value = "";
+}
+
+async function saveChatTitle(chat: Chat) {
+  const title = renameTitle.value.trim();
+  if (!title) return;
+  try {
+    const renamed = await request<Chat>(`/chats/${chat.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    });
+    chats.value = chats.value.map((item) => (item.id === renamed.id ? renamed : item));
+    cancelRename();
+  } catch (cause) {
+    renameError.value = cause instanceof Error ? cause.message : "Could not rename this chat";
+  }
+}
+
 onMounted(async () => {
-  window.addEventListener("chats-updated", reloadChats);
+  window.addEventListener("chats-updated", chatsUpdated);
   if (!auth.token) return;
   await auth.fetchMe();
   if (!auth.authenticated) await router.replace("/login");
   else await loadChats();
 });
 
-onUnmounted(() => window.removeEventListener("chats-updated", reloadChats));
+onUnmounted(() => window.removeEventListener("chats-updated", chatsUpdated));
 
-watch(() => route.path, () => void loadChats());
+watch(() => route.path, () => {
+  openMenuChatId.value = null;
+  void loadChats();
+});
 watch(() => auth.authenticated, () => void loadChats());
 
 function logout() {
@@ -61,15 +96,58 @@ function logout() {
       <button class="btn mb-4 w-full" @click="startNewChat">New chat</button>
       <nav aria-label="Chats" class="space-y-1">
         <p v-if="sidebarError" class="px-3 text-xs text-rose-300" role="alert">{{ sidebarError }}</p>
-        <RouterLink
-          v-for="chat in chats"
-          :key="chat.id"
-          :to="`/chats/${chat.id}`"
-          class="block truncate rounded-lg px-3 py-2 text-sm hover:bg-slate-800"
-          :class="route.params.id === chat.id ? 'bg-slate-800 text-white' : 'text-slate-300'"
-        >
-          {{ chat.title }}
-        </RouterLink>
+        <div v-for="chat in chats" :key="chat.id" class="relative">
+          <form
+            v-if="renameChatId === chat.id"
+            class="space-y-2 rounded-lg bg-slate-900 p-2"
+            @submit.prevent="saveChatTitle(chat)"
+          >
+            <label :for="`sidebar-title-${chat.id}`" class="sr-only">Rename chat</label>
+            <input
+              :id="`sidebar-title-${chat.id}`"
+              v-model="renameTitle"
+              class="input text-sm"
+              maxlength="200"
+              required
+              autofocus
+              @keydown.esc.prevent="cancelRename"
+            />
+            <p v-if="renameError" class="text-xs text-rose-300" role="alert">{{ renameError }}</p>
+            <div class="flex justify-end gap-2">
+              <button class="text-xs text-slate-400" type="button" @click="cancelRename">Cancel</button>
+              <button class="text-xs text-indigo-300" type="submit">Save</button>
+            </div>
+          </form>
+          <div v-else class="flex items-center gap-1">
+            <RouterLink
+              :to="`/chats/${chat.id}`"
+              class="min-w-0 flex-1 truncate rounded-lg px-3 py-2 text-sm hover:bg-slate-800"
+              :class="route.params.id === chat.id ? 'bg-slate-800 text-white' : 'text-slate-300'"
+            >
+              {{ chat.title }}
+            </RouterLink>
+            <button
+              class="rounded px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+              type="button"
+              aria-haspopup="menu"
+              :aria-label="`Options for ${chat.title}`"
+              :aria-expanded="openMenuChatId === chat.id"
+              @click="openMenuChatId = openMenuChatId === chat.id ? null : chat.id"
+            >
+              ⋯
+            </button>
+          </div>
+          <div
+            v-if="openMenuChatId === chat.id"
+            class="absolute right-0 top-10 z-10 rounded-lg border border-slate-700 bg-slate-900 p-1 shadow-xl"
+            role="menu"
+            @keydown.esc.prevent="openMenuChatId = null"
+          >
+            <button class="whitespace-nowrap rounded px-3 py-2 text-left text-sm hover:bg-slate-800" role="menuitem" type="button" @click="beginRename(chat)">
+              Rename chat
+            </button>
+          </div>
+        </div>
       </nav>
       <div class="mt-6 flex items-center justify-between gap-2 border-t border-slate-800 pt-4 text-xs text-slate-400">
         <span class="truncate">{{ auth.user?.email }}</span>

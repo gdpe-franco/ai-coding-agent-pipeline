@@ -85,6 +85,11 @@ def test_coder_schema_rejects_empty_content() -> None:
         CoderResponse(file_path="index.html", content="")
 
 
+def test_coder_schema_removes_null_bytes() -> None:
+    parsed = CoderResponse(file_path="index.html", content="<h1>a\x00b</h1>")
+    assert parsed.content == "<h1>ab</h1>"
+
+
 @pytest.mark.parametrize("verdict", list(ReviewerVerdict), ids=lambda verdict: verdict.value)
 def test_reviewer_schema_accepts_verdict(verdict: ReviewerVerdict) -> None:
     assert ReviewerResponse(verdict=verdict.value, summary="s", issues=[]).verdict == verdict.value

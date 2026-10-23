@@ -38,7 +38,7 @@ onMounted(async () => {
       <li v-for="run in runs" :key="run.id" class="card flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate font-medium">{{ run.message }}</p>
-          <p class="mt-1 text-xs text-slate-500">{{ run.id }}</p>
+          <p class="mt-1 text-xs text-slate-500">{{ new Date(run.created_at).toLocaleString() }}</p>
         </div>
         <div class="flex items-center gap-3">
           <StatusBadge :status="run.status" />

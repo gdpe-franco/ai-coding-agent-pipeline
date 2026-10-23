@@ -127,9 +127,8 @@ See [API design](docs/architecture.md#6-api-design) and the
 ### What I would change with more time
 
 Add a dedicated tester agent, so a plausible review is not treated as proof the app works, and grow the
-evaluation dataset from real requests. Move generated-app execution from the static iframe to isolated
-containers or Git-backed workspaces, and move the worker to a durable external queue with spend limits and
-team RBAC.
+evaluation dataset from real requests. Move generated-app execution from the static preview page to isolated
+containers or Git-backed workspaces, and move the worker to a durable external queue with spend limits and team RBAC.
 
 ### Where other models are worth trying
 

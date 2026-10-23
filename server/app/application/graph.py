@@ -113,6 +113,16 @@ class CodingGraph:
                 parsed = PlannerResponse.model_validate(raw)
             except Exception as exc:
                 raise ModelError(f"invalid planner output: {exc}", tag="planner_error") from exc
+            suggested_title = parsed.suggested_project_title
+            if suggested_title:
+                suggested_title = " ".join(suggested_title.split())
+                if len(suggested_title) <= 80 and 2 <= len(suggested_title.split()) <= 6:
+                    await repo.suggest_initial_chat_title(
+                        UUID(state["owner_id"]),
+                        UUID(state["chat_id"]),
+                        run_id,
+                        suggested_title,
+                    )
             plan = Plan(
                 id=uuid4(),
                 project_id=project_id,

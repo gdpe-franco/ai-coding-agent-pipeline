@@ -51,6 +51,7 @@ def upgrade() -> None:
         sa.Column("summary", sa.Text(), nullable=False),
         sa.Column("preview_id", sa.UUID(), nullable=False),
         sa.Column("status", sa.Enum("active", "archived", name="project_status"), nullable=False),
+        sa.Column("preview_ready", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -73,6 +74,7 @@ def upgrade() -> None:
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("project_id", sa.UUID(), nullable=False),
         sa.Column("creation_key", sa.UUID(), nullable=False),
+        sa.Column("title_locked", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
