@@ -32,7 +32,7 @@ python -m evals.runner
 
 - Run backend checks from `server/`; `server/pyproject.toml` is the sole config (Python 3.14, line length 100, `asyncio_mode=auto`). `packages = []` installs dependencies only; the working directory makes `app` importable.
 - Ruff, pytest, and evals are the verification gate; no CI or pre-commit hooks exist. Skipped PostgreSQL tests do not satisfy it. Deterministic tests never call live models.
-- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, `app`, `worker`, with a shared `appdata` workspace volume; run migrations explicitly.
+- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, `app`, `worker`, with a shared `appdata` workspace volume; run migrations explicitly. Headless chat journey: `docker compose --profile e2e run --rm browser`.
 
 ## Code and tests
 
@@ -49,11 +49,11 @@ python -m evals.runner
 
 ## Workflow guardrails
 
-- One owner-scoped private chat per user; projects are chat context, not separate conversations. Intent detection may request selection but never chooses/creates a project. Only explicit user confirmation changes context or authorizes creation.
-- Keep request routing (`conversation_turns.request_status`) separate from coding execution (`runs.status`). Snapshots/version prevent stale context; `intent_result` explains routing; locks/heartbeats enable recovery. Do not add overlapping flags/statuses (TDD §5.5, §8.1).
-- Detector errors preserve context and open `needs_selection` with `intent_error`. Request `failed` is reserved for failures that cannot provide a usable menu. Coding-run model/schema errors go through `run_end` to `failed`, without model-error retry.
-- Graph order: planner → coder → reviewer. At most three Coder generations per round; increment attempts once per invocation before checks. No human input mid-round. Third rejection or valid `escalate` yields `awaiting_user`, preserving files, issues, round, and both counts.
-- Resume keeps run/project, increments `round`, resets only `attempts_used`, and starts a new graph thread at Planner. Close marks `failed`. Run statuses: `pending`, `running`, `awaiting_user`, `completed`, `failed`; never `paused`/`exhausted`.
+- One owner-scoped chat per project; users switch projects by switching chats. A chat's project binding is immutable. The first message atomically creates its project, chat, message, and run. No project-routing or selection agents/menus.
+- Runs belong to chats; project identity is derived through the chat. Messages and generic ordered run events retain history. Enforce idempotency for chat creation and message submission; locks/heartbeats enable recovery.
+- Coding-run model/schema errors are recorded in run events and transition the run to `failed`, without model-error retry.
+- Graph order: planner → coder → reviewer. At most three Coder generations per execution; keep the retry counter in validated checkpoint state, not relational columns. No human input mid-execution. Third rejection or valid `escalate` yields `awaiting_user`, preserving files, issues, and execution history.
+- Continuation keeps the run/chat/project, records guidance as a message, assigns a new execution ID, and starts a new graph thread at Planner. The coder retry budget stays in validated checkpoint state, not agent-specific relational columns. Close marks `failed`. Run statuses: `pending`, `running`, `awaiting_user`, `completed`, `failed`; never `paused`/`exhausted`.
 - Reviewer checks planned files exist, are nonempty/allowlisted, then runs `node --check` on generated JS before LLM review. Approval requires both stages. Use JSON Schema + Pydantic, never regex parsing; validate whole checkpoint state. Application writes `chat_reply`, not graph nodes.
 
 ## Persistence, security, and docs

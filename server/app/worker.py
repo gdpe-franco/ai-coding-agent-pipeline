@@ -13,7 +13,6 @@ from uuid import UUID
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 
-from app.application.chat import ChatRequestProcessor
 from app.application.processor import RunProcessor
 from app.domain.errors import WorkspaceError
 from app.domain.models import RunState
@@ -29,7 +28,6 @@ RETENTION_DAYS = 30
 
 
 async def _run_claim_loop(
-    chat_processor: ChatRequestProcessor,
     processor: RunProcessor,
     claim_run: Callable[[], Awaitable[RunState | None]],
     release_run: Callable[[UUID], Awaitable[None]],
@@ -40,7 +38,6 @@ async def _run_claim_loop(
     shutdown_grace_seconds: float = SHUTDOWN_GRACE_SECONDS,
 ) -> None:
     active_runs: set[asyncio.Task[None]] = set()
-    chat_task: asyncio.Task[bool] | None = None
     stop_task = asyncio.create_task(stop_event.wait())
     try:
         while not stop_event.is_set():
@@ -48,17 +45,6 @@ async def _run_claim_loop(
             active_runs.difference_update(finished)
             for task in finished:
                 task.result()
-
-            chat_idle = False
-            if chat_task is not None and chat_task.done():
-                if chat_task.result():
-                    chat_task = None
-                    continue
-                chat_task = None
-                chat_idle = True
-
-            if chat_task is None and not chat_idle and len(active_runs) < concurrency:
-                chat_task = asyncio.create_task(chat_processor.process_one())
 
             if len(active_runs) < concurrency:
                 run = await claim_run()
@@ -70,15 +56,11 @@ async def _run_claim_loop(
                     continue
 
             waiting: set[asyncio.Task] = {stop_task, *active_runs}
-            if chat_task is not None:
-                waiting.add(chat_task)
             await asyncio.wait(waiting, timeout=poll_seconds, return_when=asyncio.FIRST_COMPLETED)
     finally:
         stop_task.cancel()
         await asyncio.gather(stop_task, return_exceptions=True)
         outstanding = [*active_runs]
-        if chat_task is not None:
-            outstanding.append(chat_task)
         if outstanding:
             _, pending = await asyncio.wait(outstanding, timeout=shutdown_grace_seconds)
             for task in pending:
@@ -98,17 +80,16 @@ async def run_maintenance(
     checkpoint_threads: list[str] = []
     async with repo_factory() as repo:
         for run in await repo.completed_runs_to_archive(cutoff):
-            if run.project_id is None:
-                continue
+            project_id = run.chat.project_id
             try:
                 artifacts = await repo.artifacts_for_run(run.id)
                 files = {
-                    artifact.file_path: await workspace.read_artifact(
+                    f"{artifact.execution_id}/{artifact.file_path}": await workspace.read_artifact(
                         artifact.id, artifact.file_path
                     )
                     for artifact in artifacts
                 }
-                await workspace.archive_run(run.project_id, run.id, files)
+                await workspace.archive_run(project_id, run.id, files)
             except OSError, WorkspaceError:
                 logger.exception("could not archive completed run %s", run.id)
                 continue
@@ -160,14 +141,6 @@ async def run_worker(settings: Settings) -> None:
                     settings=settings,
                     worker_id=worker_id,
                 )
-                chat_processor = ChatRequestProcessor(
-                    repo_factory=container.repository_context,
-                    llm=container.llm_clients["planner"],
-                    worker_id=worker_id,
-                    heartbeat_seconds=settings.worker_heartbeat_seconds,
-                    stale_seconds=int(settings.worker_stale_seconds),
-                    max_runs_per_project=settings.max_runs_per_project,
-                )
 
                 async def claim_run() -> RunState | None:
                     async with container.session_factory() as session:
@@ -204,7 +177,6 @@ async def run_worker(settings: Settings) -> None:
                 )
                 try:
                     await _run_claim_loop(
-                        chat_processor,
                         processor,
                         claim_run,
                         release_run,

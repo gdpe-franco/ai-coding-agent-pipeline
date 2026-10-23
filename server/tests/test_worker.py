@@ -12,17 +12,12 @@ def run_state() -> RunState:
     return RunState(
         id=uuid4(),
         owner_id=uuid4(),
-        conversation_id=uuid4(),
+        chat_id=uuid4(),
         project_id=uuid4(),
+        execution_id=uuid4(),
         message="build",
         status=RunStatus.RUNNING,
     )
-
-
-class IdleChatProcessor:
-    async def process_one(self) -> bool:
-        await asyncio.sleep(0)
-        return False
 
 
 class PausedRunProcessor:
@@ -69,7 +64,6 @@ async def test_worker_runs_two_projects_concurrently_and_stops_claiming() -> Non
 
     worker = asyncio.create_task(
         _run_claim_loop(
-            IdleChatProcessor(),
             processor,
             claim,
             release,
@@ -105,7 +99,6 @@ async def test_worker_releases_a_run_claimed_as_shutdown_starts() -> None:
         released.append(run_id)
 
     await _run_claim_loop(
-        IdleChatProcessor(),
         processor,
         claim,
         release,
@@ -136,7 +129,6 @@ async def test_worker_cancels_remaining_work_after_shutdown_grace() -> None:
 
     worker = asyncio.create_task(
         _run_claim_loop(
-            IdleChatProcessor(),
             processor,
             claim,
             release,

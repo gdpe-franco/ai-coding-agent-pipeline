@@ -5,15 +5,19 @@ import { request } from "../api";
 import EventTimeline from "../components/EventTimeline.vue";
 import PreviewFrame from "../components/PreviewFrame.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import type { Run, RunEvent } from "../types";
+import type { Run, RunArtifact, RunEvent } from "../types";
 
 const route = useRoute();
 const runId = String(route.params.id);
 const run = ref<Run | null>(null);
 const events = ref<RunEvent[]>([]);
+const artifacts = ref<RunArtifact[]>([]);
+const archivedContent = ref("");
+const loadingArtifact = ref(false);
 const error = ref("");
 const guidance = ref("");
 const activeFile = ref("");
+let pendingContinuation: { guidance: string; key: string } | null = null;
 let timer: number | undefined;
 
 const terminal = computed(() => run.value?.status === "completed" || run.value?.status === "failed");
@@ -21,11 +25,21 @@ const files = computed(() => run.value?.latest_code ?? []);
 const selectedContent = computed(
   () => files.value.find((file) => file.file_path === activeFile.value)?.content ?? "",
 );
+const artifactExecutions = computed(() => {
+  const groups = new Map<string, RunArtifact[]>();
+  for (const artifact of artifacts.value) {
+    groups.set(artifact.execution_id, [...(groups.get(artifact.execution_id) ?? []), artifact]);
+  }
+  return [...groups.entries()];
+});
 
 async function load() {
   try {
-    run.value = await request<Run>(`/runs/${runId}`);
-    events.value = await request<RunEvent[]>(`/runs/${runId}/events`);
+    [run.value, events.value, artifacts.value] = await Promise.all([
+      request<Run>(`/runs/${runId}`),
+      request<RunEvent[]>(`/runs/${runId}/events`),
+      request<RunArtifact[]>(`/runs/${runId}/artifacts`),
+    ]);
     error.value = "";
     if (run.value.status === "completed" || run.value.status === "failed") {
       window.clearInterval(timer);
@@ -35,15 +49,32 @@ async function load() {
   }
 }
 
-async function resume() {
+async function viewArchivedArtifact(artifactId: string) {
+  loadingArtifact.value = true;
+  try {
+    const artifact = await request<{ content: string }>(`/runs/${runId}/artifacts/${artifactId}`);
+    archivedContent.value = artifact.content;
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "Could not load the saved file";
+  } finally {
+    loadingArtifact.value = false;
+  }
+}
+
+async function continueRun() {
   if (!guidance.value.trim()) {
     return;
   }
   try {
-    await request(`/runs/${runId}/resume`, {
+    if (pendingContinuation?.guidance !== guidance.value.trim()) {
+      pendingContinuation = { guidance: guidance.value.trim(), key: crypto.randomUUID() };
+    }
+    await request(`/runs/${runId}/continuations`, {
       method: "POST",
+      headers: { "Idempotency-Key": pendingContinuation.key },
       body: JSON.stringify({ guidance: guidance.value.trim() }),
     });
+    pendingContinuation = null;
     guidance.value = "";
     await load();
     startPolling();
@@ -92,9 +123,6 @@ onUnmounted(() => window.clearInterval(timer));
           <StatusBadge :status="run.status" />
         </div>
         <p class="mt-2 max-w-3xl whitespace-pre-wrap text-sm text-slate-300">{{ run.message }}</p>
-        <p class="mt-2 text-xs text-slate-500">
-          Round {{ run.round }} · {{ run.attempts_used }} attempt(s) this round · {{ run.attempts_total }} total
-        </p>
       </div>
       <button class="btn-secondary" @click="load">Refresh</button>
     </header>
@@ -102,12 +130,12 @@ onUnmounted(() => window.clearInterval(timer));
     <div v-if="run.status === 'awaiting_user'" class="card border-amber-700/60 bg-amber-950/20 space-y-3">
       <h2 class="text-lg font-semibold text-amber-200">The reviewer stopped with an honest handoff</h2>
       <p class="text-sm text-amber-100/80">
-        Generated files and unresolved issues are preserved. Add guidance to start a fresh round, or close
+        Generated files and unresolved issues are preserved. Add guidance to start a fresh execution, or close
         the run. This is not an approval.
       </p>
       <textarea v-model="guidance" class="input" rows="3" placeholder="What should change?" />
       <div class="flex gap-2">
-        <button class="btn" :disabled="!guidance.trim()" @click="resume">Resume with guidance</button>
+        <button class="btn" :disabled="!guidance.trim()" @click="continueRun">Continue with guidance</button>
         <button class="btn-secondary" @click="close">Close run</button>
       </div>
     </div>
@@ -184,6 +212,25 @@ onUnmounted(() => window.clearInterval(timer));
         <p v-else class="text-sm text-slate-500">No review yet.</p>
       </section>
     </div>
+
+    <section v-if="artifactExecutions.length" class="card space-y-4">
+      <h2 class="text-lg font-semibold">Saved files by execution</h2>
+      <div v-for="([executionId, savedFiles], index) in artifactExecutions" :key="executionId">
+        <h3 class="mb-2 text-sm font-medium text-slate-400">Execution {{ index + 1 }}</h3>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="artifact in savedFiles"
+            :key="artifact.id"
+            class="btn-secondary font-mono text-xs"
+            :disabled="loadingArtifact"
+            @click="viewArchivedArtifact(artifact.id)"
+          >
+            {{ artifact.file_path }}
+          </button>
+        </div>
+      </div>
+      <pre v-if="archivedContent" class="max-h-80 overflow-auto rounded-lg bg-slate-950 p-3 text-xs">{{ archivedContent }}</pre>
+    </section>
 
     <section class="card space-y-3">
       <h2 class="text-lg font-semibold">Event timeline</h2>

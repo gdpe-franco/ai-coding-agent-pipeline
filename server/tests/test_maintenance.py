@@ -5,12 +5,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, update
 
-from app.domain.enums import FileType, RunStatus
+from app.domain.enums import EventKind, FileType, RunStatus
 from app.infrastructure.persistence.models import RateLimitCounter, Run, WorkerHeartbeat
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from app.infrastructure.workspace.web import WebWorkspace
 from app.worker import run_maintenance
-from tests.conftest import create_test_user
+from tests.conftest import create_test_chat, create_test_user
 
 pytestmark = pytest.mark.usefixtures("require_database")
 
@@ -23,7 +23,7 @@ class FakeSaver:
         self.deleted_threads.append(thread_id)
 
 
-async def test_maintenance_archives_old_completed_and_preserves_current_project_files(
+async def test_maintenance_archives_old_runs_and_preserves_project_state(
     session_factory, repo_factory, tmp_path
 ) -> None:
     now = datetime(2026, 10, 23, tzinfo=UTC)
@@ -32,32 +32,36 @@ async def test_maintenance_archives_old_completed_and_preserves_current_project_
     async with session_factory() as session:
         owner = await create_test_user(session, "retention@example.com")
         repo = SqlAlchemyRepository(session)
-        project = await repo.create_project(owner.id, "Current files")
-        old_completed = await repo.create_run(owner.id, "old completed", project.id)
-        await repo.update_run(old_completed.id, status=RunStatus.COMPLETED)
-        old_completed_thread = await repo.add_graph_run(
-            old_completed.id, 1, f"{old_completed.id}:1"
+        _project_chat, project, old_run, _ = await create_test_chat(
+            session, owner.id, "Old completed project"
         )
-        artifact = await repo.add_artifact(old_completed.id, "index.html", FileType.HTML, "a" * 64)
+        await repo.update_run(old_run.id, status=RunStatus.COMPLETED)
+        artifact = await repo.add_artifact(
+            old_run.id, old_run.execution_id, "index.html", FileType.HTML, "a" * 64
+        )
+        await repo.append_event(old_run.id, EventKind.RUN_COMPLETED, {}, old_run.execution_id)
 
-        recent_project = await repo.create_project(owner.id, "Recent")
-        recent_completed = await repo.create_run(owner.id, "recent completed", recent_project.id)
-        await repo.update_run(recent_completed.id, status=RunStatus.COMPLETED)
-        recent_thread = await repo.add_graph_run(recent_completed.id, 1, f"{recent_completed.id}:1")
+        _recent_chat, _recent_project, recent_run, _ = await create_test_chat(
+            session, owner.id, "Recent completed project"
+        )
+        await repo.update_run(recent_run.id, status=RunStatus.COMPLETED)
+        await repo.append_event(recent_run.id, EventKind.RUN_COMPLETED, {}, recent_run.execution_id)
 
-        failed_project = await repo.create_project(owner.id, "Failed")
-        old_failed = await repo.create_run(owner.id, "old failed", failed_project.id)
+        _failed_chat, _failed_project, old_failed, _ = await create_test_chat(
+            session, owner.id, "Old failed project"
+        )
         await repo.update_run(old_failed.id, status=RunStatus.FAILED)
-        failed_thread = await repo.add_graph_run(old_failed.id, 1, f"{old_failed.id}:1")
+        await repo.append_event(old_failed.id, EventKind.RUN_FAILED, {}, old_failed.execution_id)
 
-        handoff_project = await repo.create_project(owner.id, "Handoff")
-        old_handoff = await repo.create_run(owner.id, "old handoff", handoff_project.id)
+        _handoff_chat, _handoff_project, old_handoff, _ = await create_test_chat(
+            session, owner.id, "Old handoff project"
+        )
         await repo.update_run(old_handoff.id, status=RunStatus.AWAITING_USER)
-        handoff_thread = await repo.add_graph_run(old_handoff.id, 1, f"{old_handoff.id}:1")
+        await repo.append_event(old_handoff.id, EventKind.HANDOFF, {}, old_handoff.execution_id)
 
         for run_id, timestamp in (
-            (old_completed.id, old),
-            (recent_completed.id, recent),
+            (old_run.id, old),
+            (recent_run.id, recent),
             (old_failed.id, old),
             (old_handoff.id, old),
         ):
@@ -91,33 +95,32 @@ async def test_maintenance_archives_old_completed_and_preserves_current_project_
     await run_maintenance(repo_factory, workspace, saver, now=now, stale_after_seconds=60)
 
     archive_file = (
-        workspace.root / "archived" / str(project.id) / str(old_completed.id) / "index.html"
+        workspace.root
+        / "archived"
+        / str(project.id)
+        / str(old_run.id)
+        / str(old_run.execution_id)
+        / "index.html"
     )
     assert archive_file.read_text(encoding="utf-8") == "old run source"
     assert await workspace.read_file(project.id, "index.html") == "latest source"
     assert await workspace.read_preview(project.id, "index.html") == b"latest preview"
-
-    await workspace.write_artifact(artifact.id, "index.html", "changed after archiving")
+    await workspace.write_artifact(artifact.id, "index.html", "changed after archive")
     await run_maintenance(repo_factory, workspace, saver, now=now, stale_after_seconds=60)
-
     assert archive_file.read_text(encoding="utf-8") == "old run source"
+
     async with session_factory() as session:
-        saved_completed = await session.get(Run, old_completed.id)
-        saved_recent = await session.get(Run, recent_completed.id)
-        saved_failed = await session.get(Run, old_failed.id)
-        saved_handoff = await session.get(Run, old_handoff.id)
+        saved = {run_id: await session.get(Run, run_id) for run_id in (old_run.id, recent_run.id)}
         counters = list((await session.execute(select(RateLimitCounter))).scalars())
         heartbeats = list((await session.execute(select(WorkerHeartbeat))).scalars())
-    assert saved_completed.archived is True
-    assert saved_completed.updated_at == old
-    assert saved_recent.archived is False
-    assert saved_failed.archived is False
-    assert saved_handoff.archived is False
+    assert saved[old_run.id].archived is True
+    assert saved[old_run.id].updated_at == old
+    assert saved[recent_run.id].archived is False
     assert set(saver.deleted_threads) == {
-        old_completed_thread.thread_id,
-        failed_thread.thread_id,
+        f"{old_run.id}:{old_run.execution_id}",
+        f"{old_failed.id}:{old_failed.execution_id}",
     }
-    assert recent_thread.thread_id not in saver.deleted_threads
-    assert handoff_thread.thread_id not in saver.deleted_threads
+    assert f"{recent_run.id}:{recent_run.execution_id}" not in saver.deleted_threads
+    assert f"{old_handoff.id}:{old_handoff.execution_id}" not in saver.deleted_threads
     assert [(counter.key_hash, counter.count) for counter in counters] == [(b"f" * 32, 1)]
     assert [heartbeat.worker_id for heartbeat in heartbeats] == ["live"]

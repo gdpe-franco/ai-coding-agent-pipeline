@@ -96,7 +96,6 @@ def test_registry_uses_azure_deployments_per_role() -> None:
 
     assert all(isinstance(client, OpenAICompatibleClient) for client in clients.values())
     assert clients["planner"].model == "planner-deployment"
-    assert clients["resolver"].model == "planner-deployment"
     assert clients["coder"].model == "coder-deployment"
     assert clients["reviewer"].model == "reviewer-deployment"
 

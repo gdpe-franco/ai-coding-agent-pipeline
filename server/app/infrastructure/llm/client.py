@@ -114,16 +114,15 @@ class ProviderRegistry:
     def build(self) -> dict[str, LLMClient]:
         clients: dict[str, LLMClient] = {}
         unsupported_temperature: set[str] = set()
-        for role in ("planner", "coder", "reviewer", "resolver"):
-            deployment_role = "planner" if role == "resolver" else role
-            missing = self._missing_setting(deployment_role)
+        for role in ("planner", "coder", "reviewer"):
+            missing = self._missing_setting(role)
             if missing is not None:
                 clients[role] = UnavailableLLMClient(missing)
                 continue
             clients[role] = OpenAICompatibleClient(
                 api_key=self.settings.azure_openai_api_key,
                 base_url=self.settings.azure_openai_endpoint,
-                model=self._deployment(deployment_role),
+                model=self._deployment(role),
                 unsupported_temperature=unsupported_temperature,
             )
         return clients

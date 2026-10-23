@@ -3,8 +3,8 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** MVP in progress. Private accounts, persistent chat, pre-run intent detection, confirmed
-> project/feature selection from chat, and an Azure live run are implemented. Broader provider evaluation
+> **Status:** MVP in progress. Private accounts, a persistent chat per project, run history, and an Azure live run
+> are implemented. Broader provider evaluation
 > remains follow-on work.
 
 ## How it works
@@ -31,10 +31,10 @@ preview --> files : copied static files
 @enduml
 ```
 
-After login, the user lands in one persistent private chat; it restores the user's ordered conversation history
-and is the only item in the main navigation. A worker classifies persisted chat requests before claiming coding
-runs and executing the LangGraph workflow (planner → coder → reviewer). Project and feature targets are always
-confirmed by the user in that same transcript.
+After login, the user opens a project chat from the sidebar or starts a new chat. The first message atomically
+creates its project, chat, message, and run. Each chat stays bound to one project; switching chats is the only
+way to change project context. The worker executes each run through the LangGraph workflow (planner → coder →
+reviewer) and records progress in the run's event history.
 
 The [technical design document](docs/architecture.md) is the source of truth for the stack, contracts, security
 rules, schema, trade-offs, and the presentation guide. The PRD, in the ignored `tasks/` directory, owns user
@@ -103,7 +103,7 @@ Run the SPA with `npm ci && npm run dev` from `client/`; Vite proxies `/api` to 
 
 ## Security
 
-- JWT authentication; projects, runs, files, and traces are owner-scoped.
+- JWT authentication; chats, projects, runs, files, and run events are owner-scoped.
 - Per-IP and per-user rate limits; over-limit requests return `429` with `Retry-After`.
 - Only the developer configures the provider, deployments, and credentials; users have no settings surface.
 - Credentials are resolved in infrastructure and never reach domain or application code.
@@ -136,15 +136,15 @@ team RBAC.
 The model layer is a port, so a second provider would need an infrastructure adapter plus developer
 configuration; end users never choose. Azure deployment names can already be switched per role through
 environment settings. The Reviewer is the best first experiment: a wrong review is recoverable, while a wrong
-Coder output consumes an attempt.
+Coder output consumes one of the bounded generations.
 Planner and Coder are poor candidates for small models because multi-file coherence, long context, and strict
 structured output degrade first. See [providers and secrets](docs/architecture.md#43-providers-and-secrets).
 
 ### How Coder and Reviewer disagreement is handled
 
-The review loop is bounded to three Coder attempts and runs without human input. An unresolved disagreement is
-never shown as success: the run stops in `awaiting_user` with the latest files, open issues, and both counts.
-New guidance reruns the whole planner → coder → reviewer flow with a fresh attempt budget. See the
+The workflow is bounded to three Coder generations per execution and runs without human input. An unresolved
+disagreement is never shown as success: the run stops in `awaiting_user` with the latest files, open issues, and
+event history. Guidance continues the same run in a new execution. See the
 [state contract](docs/architecture.md#52-state-contract).
 
 ## Docs

@@ -8,23 +8,21 @@ from langgraph.graph import END, START, StateGraph
 from app.application.agent_schemas import (
     CODER_SCHEMA,
     PLANNER_SCHEMA,
-    RESOLVER_SCHEMA,
     REVIEWER_SCHEMA,
     CoderResponse,
     PlannerResponse,
-    ResolverResponse,
     ReviewerResponse,
 )
 from app.application.ports import RepositoryFactory
 from app.application.prompts import (
     coder_messages,
     planner_messages,
-    resolver_messages,
     reviewer_messages,
 )
 from app.domain.enums import EventKind, FileType, ReviewerVerdict
-from app.domain.errors import ModelError, ResolverError
+from app.domain.errors import ModelError
 from app.domain.models import Code, Feedback, Issue, Plan, PlanStep, validate_file_type
+from app.domain.policies import generation_budget_exhausted, is_approved, requires_handoff
 from app.domain.serialization import (
     checksum,
     code_payload,
@@ -37,8 +35,9 @@ from app.domain.serialization import (
 class GraphState(TypedDict, total=False):
     run_id: str
     owner_id: str
-    project_id: str | None
-    project_title: str
+    chat_id: str
+    project_id: str
+    execution_id: str
     message: str
     guidance: str | None
     memory: str
@@ -46,11 +45,7 @@ class GraphState(TypedDict, total=False):
     code: list[dict[str, Any]]
     feedback: dict[str, Any]
     checks: dict[str, Any]
-    attempts_used: int
-    attempts_total: int
-    round: int
-    graph_run_id: str
-    skip_resolve: bool
+    coder_generations: int
     approved: bool
     handoff: bool
     error: str | None
@@ -63,28 +58,22 @@ class CodingGraph:
         workspace: Any,
         memory: Any,
         repo_factory: RepositoryFactory,
-        max_coder_attempts: int = 3,
+        max_coder_generations: int = 3,
         checkpointer: Any | None = None,
     ) -> None:
         self.llm_clients = llm_clients
         self.workspace = workspace
         self.memory = memory
         self.repo_factory = repo_factory
-        self.max_coder_attempts = max_coder_attempts
+        self.max_coder_generations = max_coder_generations
         self.graph = self._build(checkpointer)
 
     def _build(self, checkpointer: Any | None):
         workflow = StateGraph(GraphState)
-        workflow.add_node("resolve", self.resolve)
         workflow.add_node("planner", self.planner)
         workflow.add_node("coder", self.coder)
         workflow.add_node("reviewer", self.reviewer)
-        workflow.add_conditional_edges(
-            START,
-            lambda state: "planner" if state.get("skip_resolve") else "resolve",
-            {"resolve": "resolve", "planner": "planner"},
-        )
-        workflow.add_edge("resolve", "planner")
+        workflow.add_edge(START, "planner")
         workflow.add_edge("planner", "coder")
         workflow.add_edge("coder", "reviewer")
         workflow.add_conditional_edges(
@@ -97,75 +86,27 @@ class CodingGraph:
     async def ainvoke(self, state: GraphState, config: dict[str, Any]) -> GraphState:
         return await self.graph.ainvoke(state, config=config)
 
-    async def resolve(self, state: GraphState) -> GraphState:
-        async with self.repo_factory() as repo:
-            project_id = state.get("project_id")
-            if project_id:
-                project = await repo.get_owned_project_context(
-                    UUID(project_id), UUID(state["owner_id"])
-                )
-                if project is None:
-                    raise ResolverError("project is not owned by the run owner")
-                title = project.title
-                await self._graph_event(
-                    repo, state, "resolve", {"project_id": str(project.id), "explicit": True}
-                )
-                await repo.commit()
-                return {"project_id": str(project.id), "project_title": title}
-
-            client = self.llm_clients["resolver"]
-            raw = await client.complete(
-                "resolver",
-                resolver_messages(
-                    state["message"],
-                    await repo.project_index(UUID(state["owner_id"])),
-                    await repo.recent_runs(UUID(state["owner_id"])),
-                ),
-                RESOLVER_SCHEMA,
-            )
-            try:
-                parsed = ResolverResponse.model_validate(raw)
-            except Exception as exc:
-                raise ResolverError(f"invalid resolver output: {exc}") from exc
-
-            project = None
-            if parsed.project_id is not None:
-                project = await repo.get_owned_project_context(
-                    parsed.project_id, UUID(state["owner_id"])
-                )
-                if project is None:
-                    raise ResolverError("resolver selected a project outside the owner's scope")
-            if project is None:
-                project = await repo.create_project_context(
-                    UUID(state["owner_id"]), parsed.title, parsed.reason
-                )
-            await repo.update_run(UUID(state["run_id"]), project_id=project.id)
-            await repo.append_event(
-                UUID(state["run_id"]),
-                EventKind.PROJECT_RESOLVED,
-                {"project_id": str(project.id), "title": project.title, "reason": parsed.reason},
-            )
-            await repo.commit()
-            await self._graph_event(
-                repo,
-                state,
-                "resolve",
-                {"project_id": str(project.id), "created": parsed.project_id is None},
-            )
-            await repo.commit()
-            return {"project_id": str(project.id), "project_title": project.title}
-
     async def planner(self, state: GraphState) -> GraphState:
         async with self.repo_factory() as repo:
-            project_id = UUID(state["project_id"])  # type: ignore[arg-type]
-            memory = await self.memory.load_project_memory(UUID(state["owner_id"]), project_id)
-            turns = await repo.list_conversation_turns(UUID(state["owner_id"]), project_id)
-            conversation = [
-                {"role": turn.role.value, "content": turn.content} for turn in turns[-20:]
+            project_id = UUID(state["project_id"])
+            run_id = UUID(state["run_id"])
+            execution_id = UUID(state["execution_id"])
+            await repo.append_event(
+                run_id, EventKind.STEP_STARTED, {"step_key": "planner"}, execution_id
+            )
+            await repo.commit()
+            memory = await self.memory.load_project_memory(project_id)
+            turns = await repo.list_chat_messages(UUID(state["chat_id"]))
+            chat_history = [
+                {
+                    "role": turn.role.value if hasattr(turn.role, "value") else turn.role,
+                    "content": turn.content,
+                }
+                for turn in turns[-20:]
             ]
             raw = await self.llm_clients["planner"].complete(
                 "planner",
-                planner_messages(state["message"], memory, conversation, state.get("guidance")),
+                planner_messages(state["message"], memory, chat_history, state.get("guidance")),
                 PLANNER_SCHEMA,
             )
             try:
@@ -186,12 +127,13 @@ class CodingGraph:
                     for step in parsed.steps
                 ],
             )
-            await repo.add_plan(UUID(state["run_id"]), plan)
+            await repo.add_plan(run_id, plan)
             await repo.append_event(
-                UUID(state["run_id"]), EventKind.PLANNER, {"plan": plan_payload(plan)}
+                run_id,
+                EventKind.STEP_COMPLETED,
+                {"step_key": "planner", "plan": plan_payload(plan)},
+                execution_id,
             )
-            await repo.commit()
-            await self._graph_event(repo, state, "planner", {"steps": len(plan.steps)})
             await repo.commit()
             return {
                 "plan": {
@@ -215,11 +157,15 @@ class CodingGraph:
     async def coder(self, state: GraphState) -> GraphState:
         async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
-            attempts_used = state.get("attempts_used", 0) + 1
-            attempts_total = state.get("attempts_total", 0) + 1
-            await repo.update_run(
-                run_id, attempts_used=attempts_used, attempts_total=attempts_total
+            execution_id = UUID(state["execution_id"])
+            coder_generations = state.get("coder_generations", 0) + 1
+            await repo.append_event(
+                run_id,
+                EventKind.STEP_STARTED,
+                {"step_key": "coder", "generation": coder_generations},
+                execution_id,
             )
+            await repo.commit()
             plan = plan_from_payload(state["plan"])
             allowed_paths = {step.file_path for step in plan.steps}
             code: list[dict[str, Any]] = []
@@ -261,26 +207,40 @@ class CodingGraph:
                     file_type=step.file_type.value,
                 )
                 code.append(code_payload(item))
-                await repo.append_event(
-                    run_id,
-                    EventKind.CODER,
-                    {"file_path": item.file_path, "checksum": item.checksum},
-                )
-            await repo.update_run(run_id, latest_code=code)
-            await repo.commit()
-            await self._graph_event(
-                repo, state, "coder", {"attempt": attempts_used, "files": len(code)}
+            await repo.append_event(
+                run_id,
+                EventKind.GENERATION,
+                {
+                    "step_key": "coder",
+                    "generation": coder_generations,
+                    "files": [
+                        {"file_path": item["file_path"], "checksum": item["checksum"]}
+                        for item in code
+                    ],
+                },
+                execution_id,
             )
+            await repo.append_event(
+                run_id,
+                EventKind.STEP_COMPLETED,
+                {"step_key": "coder", "generation": coder_generations},
+                execution_id,
+            )
+            await repo.update_run(run_id, latest_code=code)
             await repo.commit()
             return {
                 "code": code,
-                "attempts_used": attempts_used,
-                "attempts_total": attempts_total,
+                "coder_generations": coder_generations,
             }
 
     async def reviewer(self, state: GraphState) -> GraphState:
         async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
+            execution_id = UUID(state["execution_id"])
+            await repo.append_event(
+                run_id, EventKind.STEP_STARTED, {"step_key": "reviewer"}, execution_id
+            )
+            await repo.commit()
             plan = plan_from_payload(state["plan"])
             check_report = await self.workspace.check_readable(
                 plan.project_id, [step.file_path for step in plan.steps]
@@ -304,7 +264,6 @@ class CodingGraph:
             ]
             issues.extend(Issue(message=item) for item in check_report.issues)
             feedback = Feedback(verdict=verdict, summary=parsed.summary, issues=issues)
-            await repo.add_review(run_id, feedback)
             feedback_data = feedback_payload(feedback)
             checks_data = {
                 "file_structure_ok": check_report.file_structure_ok,
@@ -316,19 +275,30 @@ class CodingGraph:
             await repo.update_run(run_id, feedback=feedback_data, checks=checks_data)
             await repo.append_event(
                 run_id,
-                EventKind.REVIEWER,
-                {"verdict": verdict.value, "summary": feedback.summary, "issues": len(issues)},
-            )
-            await repo.commit()
-            await self._graph_event(
-                repo, state, "reviewer", {"verdict": verdict.value, "checks_ok": check_report.ok}
+                EventKind.STEP_COMPLETED,
+                {
+                    "step_key": "reviewer",
+                    "verdict": verdict.value,
+                    "summary": feedback.summary,
+                    "issues": [
+                        {"message": issue.message, "file_path": issue.file_path}
+                        for issue in feedback.issues
+                    ],
+                    "checks": checks_data,
+                },
+                execution_id,
             )
             await repo.commit()
             return {
                 "feedback": feedback_data,
                 "checks": checks_data,
-                "approved": verdict == ReviewerVerdict.APPROVE and check_report.ok,
-                "handoff": verdict == ReviewerVerdict.ESCALATE,
+                "approved": is_approved(feedback, check_report),
+                "handoff": requires_handoff(
+                    feedback,
+                    state.get("coder_generations", 0),
+                    self.max_coder_generations,
+                    check_report,
+                ),
             }
 
     def route_after_review(self, state: GraphState) -> str:
@@ -338,13 +308,8 @@ class CodingGraph:
             return "end"
         if state.get("handoff"):
             return "end"
-        if state.get("attempts_used", 0) >= self.max_coder_attempts:
+        if generation_budget_exhausted(
+            state.get("coder_generations", 0), self.max_coder_generations
+        ):
             return "end"
         return "coder"
-
-    async def _graph_event(
-        self, repo, state: GraphState, node: str, payload: dict[str, Any]
-    ) -> None:
-        graph_run_id = state.get("graph_run_id")
-        if graph_run_id:
-            await repo.add_graph_event(UUID(graph_run_id), node, payload)

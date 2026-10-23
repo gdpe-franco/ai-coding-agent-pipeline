@@ -4,14 +4,24 @@ import type { RunEvent } from "../types";
 defineProps<{ events: RunEvent[] }>();
 
 function summary(payload: Record<string, unknown>): string {
-  const value = payload.summary ?? payload.message ?? payload.verdict ?? payload.file_path ?? payload.guidance;
+  const value =
+    payload.summary ??
+    payload.message ??
+    payload.verdict ??
+    payload.step_key ??
+    payload.file_path ??
+    payload.guidance;
   if (typeof value === "string") {
     return value.length > 140 ? `${value.slice(0, 140)}…` : value;
   }
-  if (payload.attempt !== undefined) {
-    return `attempt ${payload.attempt}`;
+  if (payload.generation !== undefined) {
+    return `generation ${payload.generation}`;
   }
   return "";
+}
+
+function payloadJson(payload: Record<string, unknown>): string {
+  return JSON.stringify(payload, null, 2);
 }
 </script>
 
@@ -24,7 +34,13 @@ function summary(payload: Record<string, unknown>): string {
       <span class="w-36 shrink-0 font-mono text-xs uppercase tracking-wide text-indigo-300">
         {{ event.kind }}
       </span>
-      <span class="min-w-0 break-words text-slate-300">{{ summary(event.payload) }}</span>
+      <div class="min-w-0 flex-1 break-words text-slate-300">
+        <p>{{ summary(event.payload) }}</p>
+        <details v-if="Object.keys(event.payload).length" class="mt-1 text-xs text-slate-500">
+          <summary class="cursor-pointer hover:text-slate-300">Details</summary>
+          <pre class="mt-2 max-h-80 overflow-auto rounded bg-slate-950 p-3 text-slate-300">{{ payloadJson(event.payload) }}</pre>
+        </details>
+      </div>
     </li>
     <li v-if="events.length === 0" class="text-sm text-slate-500">No events yet.</li>
   </ol>

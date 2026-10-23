@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     preview_host: str = "http://preview.localhost:8000"
 
-    max_coder_attempts: int = 3
     max_runs_per_project: int = 100
 
     azure_openai_api_key: str = ""

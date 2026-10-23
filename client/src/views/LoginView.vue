@@ -18,7 +18,7 @@ async function submit() {
     } else {
       await auth.register(email.value, password.value);
     }
-    await router.push("/chat");
+    await router.push("/chats");
   } catch {
     localError.value = auth.error || "Authentication failed";
   }

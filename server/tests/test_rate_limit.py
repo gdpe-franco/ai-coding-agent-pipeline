@@ -18,7 +18,7 @@ from app.infrastructure.rate_limit.postgres import (
 )
 from app.main import create_app
 from app.settings import Settings
-from tests.conftest import create_test_user
+from tests.conftest import create_test_chat, create_test_user
 
 pytestmark = pytest.mark.usefixtures("require_database")
 
@@ -27,11 +27,9 @@ async def _seed_run(session_factory):
     async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         user = await create_test_user(session, f"{uuid4().hex}@example.com")
-        run = await repo.create_run(
-            user.id,
-            "build",
-            None,
-            latest_code=[{"file_path": "index.html", "content": "accepted"}],
+        _chat, _project, run, _ = await create_test_chat(session, user.id, "build")
+        await repo.update_run(
+            run.id, latest_code=[{"file_path": "index.html", "content": "accepted"}]
         )
         return run.id
 
@@ -39,11 +37,14 @@ async def _seed_run(session_factory):
 async def test_claim_pending_and_stale_running(session_factory) -> None:
     run_id = await _seed_run(session_factory)
     async with session_factory() as session:
+        execution_id = (await session.get(Run, run_id)).execution_id
+    async with session_factory() as session:
         repo = SqlAlchemyRepository(session)
         claimed = await repo.claim("worker-a")
         assert claimed is not None and claimed.id == run_id
         assert claimed.status == RunStatus.RUNNING
         assert claimed.latest_code == [{"file_path": "index.html", "content": "accepted"}]
+        assert claimed.execution_id == execution_id
         await repo.release(run_id)
 
     async with session_factory() as session:
@@ -63,6 +64,7 @@ async def test_claim_pending_and_stale_running(session_factory) -> None:
         claimed = await repo.claim("worker-c")
         assert claimed is not None and claimed.id == run_id
         assert claimed.latest_code == [{"file_path": "index.html", "content": "accepted"}]
+        assert claimed.execution_id == execution_id
 
 
 async def test_awaiting_user_is_not_claimable(session_factory) -> None:

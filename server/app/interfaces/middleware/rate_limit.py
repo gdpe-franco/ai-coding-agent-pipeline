@@ -75,9 +75,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if (
             request.method == "POST"
-            and path.startswith("/api/v1/chat/messages/")
-            and path.endswith("/selection")
+            and path.startswith("/api/v1/chats/")
+            and path.endswith("/messages")
         ):
+            return bucket, "run_create"
+        if request.method == "POST" and path.endswith("/continuations"):
             return bucket, "run_create"
         return (bucket,)
 
@@ -94,7 +96,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
         if path.startswith("/api/v1/auth"):
             return "auth"
-        if path in {"/api/v1/runs", "/api/v1/chat/messages"} and request.method == "POST":
+        if path == "/api/v1/chats" and request.method == "POST":
             return "run_create"
         if request.method in {"GET", "HEAD"}:
             return "read"

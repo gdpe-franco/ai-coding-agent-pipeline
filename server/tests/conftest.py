@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -14,14 +15,11 @@ from app.main import create_app
 from app.settings import Settings
 
 APP_TABLES = (
-    "graph_events",
-    "graph_runs",
-    "reviews",
-    "events",
+    "run_events",
     "artifacts",
-    "conversation_turns",
-    "conversations",
+    "chat_messages",
     "runs",
+    "chats",
     "projects",
     "users",
     "worker_heartbeats",
@@ -128,3 +126,7 @@ async def create_test_user(session: AsyncSession, email: str) -> User:
     session.add(user)
     await session.flush()
     return user
+
+
+async def create_test_chat(session: AsyncSession, owner_id, message: str = "Build a project"):
+    return await SqlAlchemyRepository(session).create_chat(owner_id, uuid4(), uuid4(), message)

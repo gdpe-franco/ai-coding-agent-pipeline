@@ -49,10 +49,11 @@ services:
   browser:
     image: mcr.microsoft.com/playwright:v1.55.1-noble
     profiles: [e2e]
+    network_mode: host
     working_dir: /work
     command: ["sh", "-lc", "npm ci && npm run test:e2e"]
     environment:
-      PLAYWRIGHT_BASE_URL: http://app:8000
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:8000
     volumes:
       - ./client:/work
     depends_on:

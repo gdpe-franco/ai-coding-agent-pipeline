@@ -4,13 +4,10 @@ import pytest
 
 from app.application.agent_schemas import (
     CODER_SCHEMA,
-    INTENT_SCHEMA,
     PLANNER_SCHEMA,
-    RESOLVER_SCHEMA,
     REVIEWER_SCHEMA,
     CoderResponse,
     PlannerResponse,
-    ResolverResponse,
     ReviewerResponse,
 )
 from app.domain.enums import ReviewerVerdict
@@ -98,15 +95,10 @@ def test_reviewer_schema_rejects_unknown_verdict() -> None:
         ReviewerResponse(verdict="maybe", summary="s", issues=[])
 
 
-def test_resolver_schema_allows_null_project() -> None:
-    parsed = ResolverResponse(project_id=None, title="New", confidence=0.4, reason="no match")
-    assert parsed.project_id is None
-
-
 @pytest.mark.parametrize(
     "schema",
-    [RESOLVER_SCHEMA, INTENT_SCHEMA, PLANNER_SCHEMA, CODER_SCHEMA, REVIEWER_SCHEMA],
-    ids=["resolver", "intent", "planner", "coder", "reviewer"],
+    [PLANNER_SCHEMA, CODER_SCHEMA, REVIEWER_SCHEMA],
+    ids=["planner", "coder", "reviewer"],
 )
 def test_model_schemas_require_every_property(schema: dict) -> None:
     objects = [schema, *schema.get("$defs", {}).values()]

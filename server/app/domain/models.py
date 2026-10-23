@@ -7,9 +7,9 @@ from uuid import UUID, uuid4
 
 from app.domain.enums import (
     ALLOWED_FILE_TYPES,
-    ConversationSender,
     EventKind,
     FileType,
+    MessageSender,
     ProjectStatus,
     ReviewerVerdict,
     RunStatus,
@@ -81,13 +81,11 @@ class Feedback:
 class RunState:
     id: UUID
     owner_id: UUID
-    conversation_id: UUID
-    project_id: UUID | None
+    chat_id: UUID
+    project_id: UUID
+    execution_id: UUID
     message: str
     status: RunStatus
-    attempts_used: int = 0
-    attempts_total: int = 0
-    round: int = 1
     user_guidance: str | None = None
     plan: dict | None = None
     latest_code: list[dict] = field(default_factory=list)
@@ -102,26 +100,6 @@ class ProjectContext:
     id: UUID
     title: str
     summary: str
-
-
-@dataclass(slots=True)
-class ChatSelection:
-    run_id: UUID
-    project_id: UUID
-    context_version: int
-
-
-@dataclass(slots=True)
-class ChatIntentRequest:
-    id: UUID
-    owner_id: UUID
-    message: str
-    context_version: int
-    project_id: UUID | None
-    active_feature_run_id: UUID | None
-    project_title: str | None
-    feature_title: str | None
-    recent_turns: list[dict[str, str]]
 
 
 def validate_relative_path(path: str) -> str:
@@ -140,14 +118,12 @@ def validate_file_type(file_type: str) -> str:
 
 
 __all__ = [
-    "ChatIntentRequest",
-    "ChatSelection",
     "CheckReport",
     "Code",
-    "ConversationSender",
     "EventKind",
     "Feedback",
     "Issue",
+    "MessageSender",
     "Plan",
     "PlanStep",
     "ProjectContext",

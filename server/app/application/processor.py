@@ -7,7 +7,7 @@ from uuid import UUID
 
 from app.application.graph import CodingGraph
 from app.application.ports import RepositoryFactory
-from app.domain.enums import ConversationSender, EventKind, RunStatus
+from app.domain.enums import EventKind, RunStatus
 from app.domain.models import RunState
 
 logger = logging.getLogger(__name__)
@@ -30,34 +30,31 @@ class RunProcessor:
         self.settings = settings
         self.worker_id = worker_id
 
-    async def process(self, run) -> None:
-        thread_id = f"{run.id}:{run.round}"
+    async def process(self, run: RunState) -> None:
+        thread_id = f"{run.id}:{run.execution_id}"
         heartbeat = asyncio.create_task(self._heartbeat_loop(run.id))
         try:
             async with self.repo_factory() as repo:
-                graph_run_id = await repo.get_or_create_graph_run(run.id, run.round, thread_id)
                 await repo.append_event(
                     run.id,
-                    EventKind.RUN_START,
-                    {"round": run.round, "worker_id": self.worker_id},
+                    EventKind.EXECUTION_STARTED,
+                    {"worker_id": self.worker_id, "execution_id": str(run.execution_id)},
+                    run.execution_id,
                 )
                 await repo.commit()
 
             state = {
                 "run_id": str(run.id),
                 "owner_id": str(run.owner_id),
-                "project_id": str(run.project_id) if run.project_id else None,
+                "chat_id": str(run.chat_id),
+                "project_id": str(run.project_id),
+                "execution_id": str(run.execution_id),
                 "message": run.message,
                 "guidance": run.user_guidance,
                 "plan": run.plan or {},
                 "code": run.latest_code or [],
                 "feedback": run.feedback or {},
                 "checks": run.checks or {},
-                "attempts_used": run.attempts_used,
-                "attempts_total": run.attempts_total,
-                "round": run.round,
-                "graph_run_id": str(graph_run_id),
-                "skip_resolve": run.project_id is not None,
             }
             result = await self.graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
             await self._finalize(run.id, result)
@@ -91,25 +88,28 @@ class RunProcessor:
             run = await repo.get_run(run_id)
             if run is None or run.status != RunStatus.RUNNING:
                 return
-            project_id = UUID(result["project_id"]) if result.get("project_id") else None
             approved = bool(result.get("approved"))
-            handoff = bool(result.get("handoff")) or (
-                not approved and result.get("attempts_used", 0) >= self.settings.max_coder_attempts
-            )
-            if not project_id:
-                raise RuntimeError("graph finished without a project")
+            handoff = bool(result.get("handoff"))
+            project_id = run.project_id
             project = await repo.get_project_context(project_id)
             if project is None:
-                raise RuntimeError("graph finished with an unknown project")
-            await repo.associate_unassigned_turns_with_project(run_id, project_id)
+                raise RuntimeError("run's chat project is unavailable")
 
             files = await self.workspace.read_all(project_id)
-            artifact_ids = await repo.ensure_artifacts_for_run(run_id, result.get("code", []))
+            code = result.get("code", [])
+            artifact_ids = await repo.ensure_artifacts_for_run(run_id, run.execution_id, code)
             await repo.commit()
             if approved:
                 await self.workspace.publish(project_id, files, artifact_ids)
+                await repo.append_event(
+                    run_id,
+                    EventKind.ARTIFACT_PUBLISHED,
+                    {"artifact_ids": [str(artifact_id) for artifact_id in artifact_ids.values()]},
+                    run.execution_id,
+                )
+                await repo.commit()
             else:
-                for item in result.get("code", []):
+                for item in code:
                     artifact_id = artifact_ids.get(item["file_path"])
                     if artifact_id:
                         await self.workspace.write_artifact(
@@ -119,67 +119,38 @@ class RunProcessor:
             feedback = result.get("feedback") or {}
             summary = feedback.get("summary") or "Run finished."
             if approved:
+                status = RunStatus.COMPLETED
                 reply = f"Approved. Generated {len(files)} files. {summary}"
-                await repo.update_run(
-                    run_id,
-                    status=RunStatus.COMPLETED,
-                    chat_reply=reply,
-                    plan=result.get("plan"),
-                    latest_code=result.get("code", []),
-                    feedback=feedback,
-                    checks=result.get("checks"),
-                    error=None,
+                event_kind = EventKind.RUN_COMPLETED
+                event_payload = {"summary": summary, "files": len(files)}
+                await self.memory.save_project_memory(
+                    project_id, f"Completed request: {run.message}\nResult: {summary}"[:4000]
                 )
-                await self._record_chat_reply(repo, run, reply, project_id)
+                await repo.update_project_summary(project_id, summary[:2000])
             elif handoff:
+                status = RunStatus.AWAITING_USER
                 reply = f"This run needs your guidance. {summary}"
-                await repo.update_run(
-                    run_id,
-                    status=RunStatus.AWAITING_USER,
-                    chat_reply=reply,
-                    plan=result.get("plan"),
-                    latest_code=result.get("code", []),
-                    feedback=feedback,
-                    checks=result.get("checks"),
-                    error=None,
-                )
-                await repo.append_event(
-                    run_id,
-                    EventKind.HANDOFF,
-                    {
-                        "summary": summary,
-                        "issues": feedback.get("issues", []),
-                        "attempts_used": result.get("attempts_used", 0),
-                        "attempts_total": result.get("attempts_total", 0),
-                    },
-                )
-                await self._record_chat_reply(repo, run, reply, project_id)
+                event_kind = EventKind.HANDOFF
+                event_payload = {"summary": summary, "issues": feedback.get("issues", [])}
             else:
                 await self._mark_failed(
                     repo,
                     run,
                     "The reviewer rejected the result but the run did not reach a handoff.",
                 )
-                await repo.commit()
                 return
-            await repo.update_project_summary(project_id, summary[:2000])
-            await repo.append_event(
+
+            await repo.finalize_run(
                 run_id,
-                EventKind.RUN_END,
-                {
-                    "status": RunStatus.COMPLETED.value
-                    if approved
-                    else RunStatus.AWAITING_USER.value
-                },
-            )
-            await repo.commit()
-            await self.memory.save_round(
-                run.owner_id,
-                project_id,
-                project.title,
-                "completed" if approved else "awaiting_user",
-                summary=summary,
-                last_feature=run.message[:500],
+                status,
+                reply,
+                event_kind,
+                event_payload,
+                plan=result.get("plan"),
+                latest_code=code,
+                feedback=feedback,
+                checks=result.get("checks"),
+                error=None,
             )
 
     async def _fail(self, run_id: UUID, exc: Exception) -> None:
@@ -188,36 +159,23 @@ class RunProcessor:
             if run is None or run.status != RunStatus.RUNNING:
                 return
             await self._mark_failed(
-                repo, run, f"{type(exc).__name__}: {exc}", tag=getattr(exc, "tag", "internal_error")
+                repo,
+                run,
+                f"{type(exc).__name__}: {exc}"[:2000],
+                tag=getattr(exc, "tag", "internal_error"),
             )
-            await repo.commit()
-
-    async def _record_chat_reply(
-        self, repo, run: RunState, message: str, project_id: UUID | None
-    ) -> None:
-        await repo.append_event(run.id, EventKind.CHAT_REPLY, {"message": message})
-        await repo.add_conversation_turn(
-            run.owner_id, message, ConversationSender.ASSISTANT, run.id, project_id
-        )
 
     async def _mark_failed(
         self, repo, run: RunState, message: str, tag: str = "internal_error"
     ) -> None:
-        await repo.update_run(
-            run.id, status=RunStatus.FAILED, error=message[:2000], chat_reply=message[:2000]
+        await repo.finalize_run(
+            run.id,
+            RunStatus.FAILED,
+            message,
+            EventKind.RUN_FAILED,
+            {"tag": tag, "message": message[:2000]},
+            error=message[:2000],
         )
-        await repo.append_event(run.id, EventKind.ERROR, {"tag": tag, "message": message[:2000]})
-        if run.project_id:
-            await repo.associate_unassigned_turns_with_project(run.id, run.project_id)
-        await self._record_chat_reply(repo, run, message[:2000], run.project_id)
-        await repo.append_event(run.id, EventKind.RUN_END, {"status": RunStatus.FAILED.value})
-        if run.project_id:
-            project = await repo.get_project_context(run.project_id)
-            await self.memory.save_round(
-                run.owner_id,
-                run.project_id,
-                project.title if project else None,
-                "failed",
-                summary=message[:2000],
-                last_feature=run.message[:500],
-            )
+
+
+__all__ = ["RunProcessor"]

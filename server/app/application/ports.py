@@ -6,11 +6,9 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from app.domain.enums import ChatIntentAction, ConversationSender, EventKind, RunStatus
+from app.domain.enums import EventKind, MessageSender, RunStatus
 from app.domain.models import (
-    ChatIntentRequest,
     CheckReport,
-    Feedback,
     Plan,
     ProjectContext,
     RunState,
@@ -64,8 +62,8 @@ class Workspace(Protocol):
     async def check_readable(self, project_id: UUID, paths: list[str]) -> CheckReport: ...
 
 
-class ConversationTurnContext(Protocol):
-    role: ConversationSender
+class ChatMessageContext(Protocol):
+    role: MessageSender
     content: str
 
 
@@ -74,98 +72,54 @@ class RunRepository(Protocol):
 
     async def get_run(self, run_id: UUID) -> RunState | None: ...
 
-    async def get_or_create_graph_run(self, run_id: UUID, round: int, thread_id: str) -> UUID: ...
-
     async def get_project_context(self, project_id: UUID) -> ProjectContext | None: ...
 
-    async def get_owned_project_context(
-        self, project_id: UUID, owner_id: UUID
-    ) -> ProjectContext | None: ...
-
-    async def create_project_context(
-        self, owner_id: UUID, title: str, summary: str = ""
-    ) -> ProjectContext: ...
-
-    async def project_index(self, owner_id: UUID) -> list[dict[str, Any]]: ...
-
-    async def recent_runs(self, owner_id: UUID, limit: int = 10) -> list[dict[str, Any]]: ...
-
-    async def list_conversation_turns(
-        self, owner_id: UUID, project_id: UUID | None = None
-    ) -> list[ConversationTurnContext]: ...
-
-    async def create_run(
-        self,
-        owner_id: UUID,
-        message: str,
-        project_id: UUID | None,
-    ) -> RunState: ...
+    async def list_chat_messages(self, chat_id: UUID) -> list[ChatMessageContext]: ...
 
     async def update_run(self, run_id: UUID, **fields: Any) -> RunState | None: ...
 
-    async def append_event(
-        self, run_id: UUID, kind: EventKind, payload: dict[str, Any]
-    ) -> None: ...
+    async def finalize_run(
+        self,
+        run_id: UUID,
+        status: RunStatus,
+        reply: str,
+        event_kind: EventKind | str,
+        event_payload: dict[str, Any],
+        **fields: Any,
+    ) -> bool: ...
 
-    async def add_review(self, run_id: UUID, feedback: Feedback) -> None: ...
+    async def append_event(
+        self,
+        run_id: UUID,
+        kind: EventKind | str,
+        payload: dict[str, Any],
+        execution_id: UUID | None = None,
+    ) -> None: ...
 
     async def add_plan(self, run_id: UUID, plan: Plan) -> None: ...
 
-    async def add_graph_event(
-        self, graph_run_id: UUID, node: str, payload: dict[str, Any]
-    ) -> None: ...
-
-    async def associate_unassigned_turns_with_project(
-        self, run_id: UUID, project_id: UUID
-    ) -> None: ...
-
     async def ensure_artifacts_for_run(
-        self, run_id: UUID, code: list[dict[str, Any]]
+        self, run_id: UUID, execution_id: UUID, code: list[dict[str, Any]]
     ) -> dict[str, UUID]: ...
 
     async def heartbeat(self, worker_id: str, run_id: UUID | None) -> None: ...
 
     async def release(self, run_id: UUID) -> None: ...
 
-    async def add_conversation_turn(
+    async def add_chat_message(
         self,
-        owner_id: UUID,
+        chat_id: UUID,
         content: str,
-        role: ConversationSender,
+        role: MessageSender,
         run_id: UUID | None = None,
-        project_id: UUID | None = None,
-    ) -> ConversationTurnContext: ...
+        idempotency_key: UUID | None = None,
+    ) -> ChatMessageContext: ...
 
     async def update_project_summary(self, project_id: UUID, summary: str) -> None: ...
 
 
 class RepositoryFactory(Protocol):
     def __call__(self) -> AbstractAsyncContextManager[RunRepository]: ...
-
-
-class ChatRequestRepository(Protocol):
-    async def heartbeat(self, worker_id: str, run_id: UUID | None) -> None: ...
-
-    async def claim_chat_request(
-        self, worker_id: str, stale_after_seconds: int
-    ) -> ChatIntentRequest | None: ...
-
-    async def heartbeat_chat_request(self, request_id: UUID, worker_id: str) -> None: ...
-
-    async def resolve_chat_request(
-        self,
-        request_id: UUID,
-        owner_id: UUID,
-        worker_id: str,
-        action: ChatIntentAction,
-        reason: str,
-        max_runs_per_project: int,
-        intent_error: bool = False,
-    ) -> None: ...
-
-
-class ChatRequestRepositoryFactory(Protocol):
-    def __call__(self) -> AbstractAsyncContextManager[ChatRequestRepository]: ...
 
 
 class RunQueue(Protocol):
@@ -181,23 +135,11 @@ class EventSink(Protocol):
 
 
 class MemoryStore(Protocol):
-    async def load_project_memory(self, owner_id: UUID, project_id: UUID) -> str: ...
+    async def load_project_memory(self, project_id: UUID) -> str: ...
 
-    async def project_index(self, owner_id: UUID) -> list[dict[str, Any]]: ...
+    async def save_project_memory(self, project_id: UUID, summary: str) -> None: ...
 
-    async def recent_runs(self, owner_id: UUID, limit: int = 10) -> list[dict[str, Any]]: ...
-
-    async def save_round(
-        self,
-        owner_id: UUID,
-        project_id: UUID,
-        title: str | None,
-        outcome: str,
-        summary: str = "",
-        last_feature: str = "",
-    ) -> None: ...
-
-    async def delete_project(self, owner_id: UUID, project_id: UUID) -> None: ...
+    async def delete_project(self, project_id: UUID) -> None: ...
 
 
 class RateLimiter(Protocol):
@@ -209,10 +151,8 @@ class Clock(Protocol):
 
 
 __all__ = [
-    "ChatRequestRepository",
-    "ChatRequestRepositoryFactory",
+    "ChatMessageContext",
     "Clock",
-    "ConversationTurnContext",
     "EventSink",
     "LLMClient",
     "MemoryStore",

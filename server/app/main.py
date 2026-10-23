@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.infrastructure.container import Container
-from app.interfaces.api import chat, health, preview, projects, runs
+from app.interfaces.api import chats, health, preview, projects, runs
 from app.interfaces.dependencies import build_fastapi_users
 from app.interfaces.middleware.rate_limit import RateLimitMiddleware
 from app.interfaces.schemas.users import UserCreate, UserRead, UserUpdate
@@ -57,7 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(preview.router)
-    app.include_router(chat.router, prefix="/api/v1")
+    app.include_router(chats.router, prefix="/api/v1")
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(runs.router, prefix="/api/v1")
 

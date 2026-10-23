@@ -9,9 +9,10 @@ from typing import Any, Self
 from uuid import UUID, uuid4
 
 from app.application.graph import CodingGraph
-from app.domain.enums import EventKind
-from app.domain.errors import ResolverError
+from app.domain.errors import MissingCredentialsError, ModelError
 from app.domain.models import CheckReport, Plan
+from app.infrastructure.llm.client import ProviderRegistry
+from app.settings import Settings
 
 SCENARIO_DIR = Path(__file__).parent / "scenarios"
 
@@ -19,7 +20,6 @@ SCENARIO_DIR = Path(__file__).parent / "scenarios"
 @dataclass
 class FakeProject:
     id: UUID
-    owner_id: UUID
     title: str
     summary: str = ""
 
@@ -27,12 +27,10 @@ class FakeProject:
 @dataclass
 class FakeRepo:
     projects: dict[UUID, FakeProject] = field(default_factory=dict)
+    messages: dict[UUID, list[dict[str, str]]] = field(default_factory=dict)
     events: list[tuple] = field(default_factory=list)
     plans: dict[UUID, Plan] = field(default_factory=dict)
-    reviews: list[tuple] = field(default_factory=list)
-    runs: dict[UUID, dict] = field(default_factory=dict)
-    turns: dict[UUID, list] = field(default_factory=dict)
-    graph_events: list[tuple] = field(default_factory=list)
+    runs: dict[UUID, dict[str, Any]] = field(default_factory=dict)
 
     async def __aenter__(self) -> Self:
         return self
@@ -43,64 +41,35 @@ class FakeRepo:
     async def commit(self) -> None:
         return None
 
-    async def get_owned_project_context(self, project_id: UUID, owner_id: UUID):
-        project = self.projects.get(project_id)
-        if project is None or project.owner_id != owner_id:
-            return None
-        return project
+    async def get_project_context(self, project_id: UUID):
+        return self.projects.get(project_id)
 
-    async def create_project_context(
-        self, owner_id: UUID, title: str, summary: str = ""
-    ) -> FakeProject:
-        project = FakeProject(id=uuid4(), owner_id=owner_id, title=title, summary=summary)
-        self.projects[project.id] = project
-        self.turns[project.id] = []
-        return project
+    async def list_chat_messages(self, chat_id: UUID):
+        return [type("Message", (), item)() for item in self.messages.get(chat_id, [])]
 
     async def update_run(self, run_id: UUID, **fields) -> None:
         self.runs.setdefault(run_id, {}).update(fields)
 
-    async def append_event(self, run_id: UUID, kind: EventKind, payload: dict) -> None:
-        self.events.append((run_id, kind, payload))
+    async def append_event(self, run_id, kind, payload, execution_id=None) -> None:
+        self.events.append((run_id, str(kind), payload, execution_id))
 
     async def add_plan(self, run_id: UUID, plan: Plan) -> None:
         self.plans[run_id] = plan
 
-    async def add_review(self, run_id: UUID, feedback) -> None:
-        self.reviews.append((run_id, feedback))
-
-    async def add_graph_event(self, graph_run_id: UUID, node: str, payload: dict) -> None:
-        self.graph_events.append((graph_run_id, node, payload))
-
-    async def list_conversation_turns(self, owner_id: UUID, project_id: UUID | None = None):
-        return self.turns.get(project_id, [])
-
-    async def project_index(self, owner_id: UUID):
-        return [
-            {"id": str(project.id), "title": project.title, "summary": project.summary}
-            for project in self.projects.values()
-            if project.owner_id == owner_id
-        ]
-
-    async def recent_runs(self, owner_id: UUID, limit: int = 10):
-        return []
-
 
 class FakeWorkspace:
-    def __init__(self, report: CheckReport | None = None) -> None:
-        self.files: dict[str, str] = {}
+    def __init__(self, report: CheckReport | None = None, existing: dict[str, str] | None = None):
+        self.files = dict(existing or {})
         self.report = report or CheckReport(
-            file_structure_ok=True, js_syntax_ok=True, files_checked=1, syntax_checked=[]
+            file_structure_ok=True, js_syntax_ok=True, files_checked=1
         )
 
     async def read_all(self, project_id: UUID) -> dict[str, str]:
         return dict(self.files)
 
-    async def write_file(
-        self, project_id: UUID, path: str, content: str, allowed_paths: set[str]
-    ) -> None:
+    async def write_file(self, project_id: UUID, path: str, content: str, allowed_paths: set[str]):
         if path not in allowed_paths:
-            raise ValueError("write outside plan")
+            raise ValueError(f"write outside plan: {path}")
         self.files[path] = content
 
     async def check_readable(self, project_id: UUID, paths: list[str]) -> CheckReport:
@@ -108,8 +77,8 @@ class FakeWorkspace:
 
 
 class FakeMemory:
-    async def load_project_memory(self, owner_id: UUID, project_id: UUID) -> str:
-        return ""
+    async def load_project_memory(self, project_id: UUID) -> str:
+        return "project conventions"
 
 
 class ScriptedLLM:
@@ -124,21 +93,23 @@ class ScriptedLLM:
 
 def planner(*files: str) -> dict:
     return {
-        "summary": f"build {len(files)} files",
+        "summary": f"Build {len(files)} files",
         "steps": [
             {
                 "name": Path(path).stem,
                 "file_path": path,
                 "file_type": Path(path).suffix.lstrip("."),
-                "description": f"complete {path}",
+                "description": f"Complete {path}",
             }
             for path in files
         ],
     }
 
 
-def coder(*files: str) -> list[dict]:
-    return [{"file_path": path, "content": f"/* {Path(path).stem} */\n"} for path in files]
+def coder(*files: str, prefix: str = "generated") -> list[dict]:
+    return [
+        {"file_path": path, "content": f"<!-- {prefix}: {Path(path).stem} -->\n"} for path in files
+    ]
 
 
 def reviewer(verdict: str) -> dict:
@@ -150,65 +121,41 @@ class ScenarioResult:
     name: str
     approved: bool
     handoff: bool
-    attempts_used: int
+    coder_generations: int
     checks_ok: bool
     checksum_ok: bool
-    resolver_ok: bool
-    ownership_ok: bool = True
+    file_preservation_ok: bool
     error: str | None = None
 
 
 async def run_scenario(name: str, config: dict[str, Any]) -> ScenarioResult:
     repo = FakeRepo()
-    workspace = FakeWorkspace()
-    owner_id = uuid4()
-    existing_project = None
-    if config.get("existing_project"):
-        existing_project = FakeProject(uuid4(), owner_id, "Existing project")
-        repo.projects[existing_project.id] = existing_project
-        repo.turns[existing_project.id] = []
-    if config.get("foreign_project"):
-        other = FakeProject(uuid4(), uuid4(), "Someone else's project")
-        repo.projects[other.id] = other
-        repo.turns[other.id] = []
-        config["resolver"] = [
-            {
-                "project_id": str(other.id),
-                "title": "foreign",
-                "confidence": 0.9,
-                "reason": "wrong owner",
-            }
-        ]
-
-    clients = {
-        risk: ScriptedLLM(config.get(risk, []))
-        for risk in ("resolver", "planner", "coder", "reviewer")
-    }
+    workspace = FakeWorkspace(config.get("report"), config.get("existing_files"))
+    project_id, chat_id, run_id, execution_id = uuid4(), uuid4(), uuid4(), uuid4()
+    repo.projects[project_id] = FakeProject(project_id, config["project_title"])
+    repo.messages[chat_id] = [{"role": "user", "content": config["request"]}]
+    clients = {role: ScriptedLLM(config.get(role, [])) for role in ("planner", "coder", "reviewer")}
     graph = CodingGraph(
         llm_clients=clients,
         workspace=workspace,
         memory=FakeMemory(),
         repo_factory=lambda: repo,
-        max_coder_attempts=3,
     )
-
-    state = {
-        "run_id": str(uuid4()),
-        "owner_id": str(owner_id),
-        "project_id": str(existing_project.id) if existing_project else None,
-        "message": config["request"],
-        "guidance": None,
-        "attempts_used": 0,
-        "attempts_total": 0,
-        "round": 1,
-        "graph_run_id": str(uuid4()),
-        "skip_resolve": existing_project is not None,
-    }
-
     error = None
     try:
-        result = await graph.ainvoke(state, {})
-    except ResolverError as exc:
+        result = await graph.ainvoke(
+            {
+                "run_id": str(run_id),
+                "owner_id": str(uuid4()),
+                "chat_id": str(chat_id),
+                "project_id": str(project_id),
+                "execution_id": str(execution_id),
+                "message": config["request"],
+                "guidance": None,
+            },
+            {},
+        )
+    except ModelError as exc:
         result = {}
         error = str(exc)
 
@@ -218,24 +165,19 @@ async def run_scenario(name: str, config: dict[str, Any]) -> ScenarioResult:
     )
     checks = result.get("checks") or {}
     checks_ok = bool(checks.get("file_structure_ok") and checks.get("js_syntax_ok"))
-
-    resolver_ok = True
-    if config.get("foreign_project"):
-        resolver_ok = error is not None and not repo.plans
-    elif config.get("existing_project"):
-        resolver_ok = result.get("project_id") == str(existing_project.id)
-    elif config.get("expect_new_project"):
-        resolver_ok = len(repo.projects) == (2 if config.get("foreign_project") else 1)
-
+    preserved = all(
+        workspace.files.get(path) == content
+        for path, content in config.get("existing_files", {}).items()
+        if path not in {step["file_path"] for step in (result.get("plan") or {}).get("steps", [])}
+    )
     return ScenarioResult(
         name=name,
         approved=bool(result.get("approved")),
         handoff=bool(result.get("handoff")),
-        attempts_used=int(result.get("attempts_used", 0)),
+        coder_generations=int(result.get("coder_generations", 0)),
         checks_ok=checks_ok,
         checksum_ok=checksum_ok,
-        resolver_ok=resolver_ok,
-        ownership_ok=resolver_ok if config.get("foreign_project") else True,
+        file_preservation_ok=preserved,
         error=error,
     )
 
@@ -244,122 +186,116 @@ def load_scenario(filename: str) -> dict[str, Any]:
     return json.loads((SCENARIO_DIR / filename).read_text(encoding="utf-8"))
 
 
+async def missing_credentials_result() -> dict[str, str]:
+    client = ProviderRegistry(
+        Settings(
+            secret_key="evaluation-secret",
+            azure_openai_api_key="",
+            azure_openai_endpoint="",
+            azure_openai_deployment_planner="",
+        )
+    ).build()["planner"]
+    try:
+        await client.complete("planner", [], {})
+    except MissingCredentialsError as exc:
+        return {"status": "passed", "error": str(exc)}
+    raise AssertionError("missing Azure credentials were not rejected")
+
+
 async def main() -> None:
     coupon = load_scenario("coupon.json")
     flappy = load_scenario("flappy.json")
-    files = ("index.html", "app.js")
-
-    configs: list[tuple[str, dict[str, Any]]] = [
-        (
+    coupon_files = ("coupon.html", "coupon.css", "coupon.js", "README.md")
+    flappy_files = ("index.html", "game.js", "style.css")
+    scenarios = [
+        await run_scenario(
             coupon["name"],
             {
+                "project_title": "Coupon validator",
                 "request": coupon["request"],
-                "expect_new_project": True,
-                "resolver": [
-                    {
-                        "project_id": None,
-                        "title": "Coupon validator",
-                        "confidence": 0.9,
-                        "reason": "new",
-                    }
-                ],
-                "planner": [planner(*files)],
-                "coder": coder(*files),
+                "planner": [planner(*coupon_files)],
+                "coder": coder(*coupon_files),
                 "reviewer": [reviewer("approve")],
             },
         ),
-        (
+        await run_scenario(
             flappy["name"],
             {
+                "project_title": "Flappy Bird",
                 "request": flappy["request"],
-                "expect_new_project": True,
-                "resolver": [
-                    {"project_id": None, "title": "Flappy", "confidence": 0.9, "reason": "new"}
-                ],
-                "planner": [planner(*files)],
-                "coder": coder(*files) + coder(*files),
+                "planner": [planner(*flappy_files)],
+                "coder": coder(*flappy_files, prefix="first")
+                + coder(*flappy_files, prefix="revised"),
                 "reviewer": [reviewer("reject"), reviewer("approve")],
             },
         ),
-        (
-            "follow-up-existing-project",
+        await run_scenario(
+            "follow-up-file-preservation",
             {
-                "request": "Add a score counter to the coupon page.",
-                "existing_project": True,
-                "planner": [planner(*files)],
-                "coder": coder(*files),
+                "project_title": "Existing project",
+                "request": "Add a settings panel",
+                "existing_files": {"keep.md": "unchanged", "index.html": "old"},
+                "planner": [planner("index.html")],
+                "coder": coder("index.html"),
                 "reviewer": [reviewer("approve")],
             },
         ),
-        (
-            "ambiguous-handoff",
+        await run_scenario(
+            "honest-handoff",
             {
-                "request": "Make it better.",
-                "expect_new_project": True,
-                "resolver": [
-                    {"project_id": None, "title": "Unclear", "confidence": 0.2, "reason": "vague"}
-                ],
-                "planner": [planner(*files)],
-                "coder": coder(*files),
-                "reviewer": [reviewer("escalate")],
+                "project_title": "Ambiguous project",
+                "request": "Make it better",
+                "planner": [planner("index.html")],
+                "coder": coder("index.html"),
+                "reviewer": [{"verdict": "escalate", "summary": "Needs guidance", "issues": []}],
             },
         ),
-        (
-            "foreign-project-blocked",
+        await run_scenario(
+            "malformed-planner-output",
             {
-                "request": "Attach to a project I do not own.",
-                "foreign_project": True,
-                "planner": [],
-                "coder": [],
-                "reviewer": [],
+                "project_title": "Malformed project",
+                "request": "Build a page",
+                "planner": [{"unexpected": "shape"}],
             },
         ),
     ]
-
-    results = [await run_scenario(name, config) for name, config in configs]
-    first_pass = [
-        result
-        for result in results
-        if result.name not in {"ambiguous-handoff", "foreign-project-blocked"}
-    ]
+    coupon_result = scenarios[0]
     metrics = {
-        "first_pass_approval": round(
-            sum(result.approved and result.attempts_used == 1 for result in first_pass)
-            / len(first_pass),
-            2,
-        ),
-        "check_pass_rate": round(
-            sum(result.checks_ok for result in results if result.error is None)
-            / len([result for result in results if result.error is None]),
-            2,
-        ),
-        "resolver_accuracy": round(sum(result.resolver_ok for result in results) / len(results), 2),
-        "checksum_integrity": all(result.checksum_ok for result in results),
-        "ownership_isolation": all(result.ownership_ok for result in results),
-        "handoff_correct": next(
-            result.handoff and not result.approved
-            for result in results
-            if result.name == "ambiguous-handoff"
-        ),
+        "sample_size": len(scenarios),
+        "check_pass_rate": sum(item.checks_ok for item in scenarios if item.error is None)
+        / max(1, sum(item.error is None for item in scenarios)),
+        "checksum_integrity": all(item.checksum_ok for item in scenarios),
+        "file_preservation": all(item.file_preservation_ok for item in scenarios),
+        "coupon_policy_approved": coupon_result.approved and coupon_result.coder_generations == 1,
+        "handoff_correct": scenarios[3].handoff and not scenarios[3].approved,
+        "malformed_output_blocked": scenarios[4].error is not None and not scenarios[4].approved,
     }
-    payload = {
-        "fake_port_policy": {"sample_size": len(first_pass), "metrics": metrics},
-        "real_provider_quality": {
-            "status": "blocked",
-            "provider": "Azure OpenAI",
-            "sample_size": 0,
-            "first_pass_coupon_approval": None,
-            "reason": "No real-provider coupon sample was run; fake-port results are not quality evidence.",
-        },
-        "scenarios": [result.__dict__ for result in results],
-    }
-    print(json.dumps(payload, indent=2))
+    print(
+        json.dumps(
+            {
+                "fake_port_policy": metrics,
+                "missing_credentials": await missing_credentials_result(),
+                "real_provider_quality": {
+                    "status": "blocked",
+                    "provider": "Azure OpenAI",
+                    "sample_size": 0,
+                    "first_pass_coupon_approval": None,
+                    "reason": "No real-provider coupon sample was run; fake-port results are not quality evidence.",
+                },
+                "scenarios": [item.__dict__ for item in scenarios],
+            },
+            indent=2,
+        )
+    )
     if not all(
-        [
-            metrics["checksum_integrity"],
-            metrics["ownership_isolation"],
-            metrics["handoff_correct"],
-        ]
+        metrics[key]
+        for key in (
+            "checksum_integrity",
+            "file_preservation",
+            "coupon_policy_approved",
+            "handoff_correct",
+            "malformed_output_blocked",
+        )
     ):
         raise SystemExit(1)
 

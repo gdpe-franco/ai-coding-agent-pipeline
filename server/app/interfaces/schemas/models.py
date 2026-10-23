@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, Field, StringConstraints
 
-from app.domain.enums import ChatRequestStatus, RunStatus
-
-
-class ProjectCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    summary: str = Field(default="", max_length=2000)
+from app.domain.enums import RunStatus
 
 
 class ProjectRead(BaseModel):
     id: UUID
+    chat_id: UUID
     title: str
     summary: str
     preview_id: UUID
@@ -28,24 +24,56 @@ class FileList(BaseModel):
     files: list[str]
 
 
-class RunCreate(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
-    project_id: UUID | None = None
+class ChatCreate(BaseModel):
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
 
 
-class RunCreated(BaseModel):
+class ChatCreated(BaseModel):
+    chat_id: UUID
+    project_id: UUID
     run_id: UUID
-    project_id: UUID | None
+
+
+class ChatRead(BaseModel):
+    id: UUID
+    project_id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatRename(BaseModel):
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class ChatMessageCreate(BaseModel):
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
+
+
+class ChatMessageRead(BaseModel):
+    id: UUID
+    chat_id: UUID
+    run_id: UUID | None = None
+    role: str
+    content: str
+    sequence: int
+    run_status: RunStatus | None = None
+    created_at: datetime
+
+
+class ChatMessageCreated(BaseModel):
+    message_id: UUID
+    run_id: UUID
+    status: RunStatus
 
 
 class RunRead(BaseModel):
     id: UUID
-    project_id: UUID | None
+    chat_id: UUID
+    project_id: UUID
+    execution_id: UUID
     message: str
     status: str
-    attempts_used: int
-    attempts_total: int
-    round: int
     user_guidance: str | None = None
     plan: dict[str, Any] | None = None
     latest_code: list[dict[str, Any]] = Field(default_factory=list)
@@ -55,7 +83,7 @@ class RunRead(BaseModel):
     error: str | None = None
 
 
-class ResumeRequest(BaseModel):
+class ContinuationRequest(BaseModel):
     guidance: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
     ]
@@ -63,6 +91,8 @@ class ResumeRequest(BaseModel):
 
 class EventRead(BaseModel):
     id: UUID
+    sequence: int
+    execution_id: UUID | None = None
     kind: str
     payload: dict[str, Any]
     created_at: datetime
@@ -70,85 +100,20 @@ class EventRead(BaseModel):
 
 class ArtifactRead(BaseModel):
     id: UUID
+    execution_id: UUID
     file_path: str
     file_type: str
     checksum: str
     content: str
 
 
-class ConversationTurnRead(BaseModel):
+class RunArtifactRead(BaseModel):
     id: UUID
-    role: str
-    content: str
-    sequence: int
-    project_id: UUID | None = None
-    run_id: UUID | None = None
-    run_status: RunStatus | None = None
-    request_status: ChatRequestStatus | None = None
+    execution_id: UUID
+    file_path: str
+    file_type: str
+    checksum: str
     created_at: datetime
-
-
-class ProjectOptionRead(BaseModel):
-    id: UUID
-    title: str
-
-
-class PendingSelectionRead(BaseModel):
-    turn_id: UUID
-    context_version: int
-    projects: list[ProjectOptionRead]
-    reason: str | None = None
-
-
-class ChatRead(BaseModel):
-    conversation_id: UUID
-    context_version: int
-    selected_project_id: UUID | None = None
-    active_feature_run_id: UUID | None = None
-    pending_selection: PendingSelectionRead | None = None
-    turns: list[ConversationTurnRead]
-
-
-class ChatMessageCreate(BaseModel):
-    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
-    request_selection: bool = False
-
-
-class ChatMessageCreated(BaseModel):
-    turn_id: UUID
-
-
-class ChatSelectionCreate(BaseModel):
-    context_version: int = Field(ge=0)
-    choice: Literal["continue_current", "existing_project", "new_project"]
-    feature_mode: Literal["continue", "new"]
-    project_id: UUID | None = None
-    title: (
-        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-        | None
-    ) = None
-
-    @model_validator(mode="after")
-    def valid_choice(self) -> ChatSelectionCreate:
-        if self.choice == "continue_current":
-            valid = (
-                self.feature_mode == "continue" and self.project_id is None and self.title is None
-            )
-        elif self.choice == "existing_project":
-            valid = self.project_id is not None and self.title is None
-        else:
-            valid = (
-                self.feature_mode == "new" and self.project_id is None and self.title is not None
-            )
-        if not valid:
-            raise ValueError("selection fields do not match the chosen action")
-        return self
-
-
-class ChatSelectionCreated(BaseModel):
-    run_id: UUID
-    project_id: UUID
-    context_version: int
 
 
 class PreviewUrlRead(BaseModel):

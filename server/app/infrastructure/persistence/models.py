@@ -6,8 +6,6 @@ from enum import StrEnum
 
 from fastapi_users.db import SQLAlchemyBaseUserTableUUID
 from sqlalchemy import (
-    Boolean,
-    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -19,21 +17,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy import (
-    Enum as SAEnum,
-)
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from app.domain.enums import (
-    ChatRequestStatus,
-    ConversationSender,
-    EventKind,
-    FileType,
-    ProjectStatus,
-    ReviewerVerdict,
-    RunStatus,
-)
+from app.domain.enums import FileType, MessageSender, ProjectStatus, RunStatus
 
 
 class Base(DeclarativeBase):
@@ -63,8 +51,6 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     __tablename__ = "users"
 
     projects: Mapped[list[Project]] = relationship(back_populates="owner")
-    runs: Mapped[list[Run]] = relationship(back_populates="owner")
-    conversation: Mapped[Conversation | None] = relationship(back_populates="owner", uselist=False)
 
 
 class Project(TimestampMixin, Base):
@@ -84,52 +70,50 @@ class Project(TimestampMixin, Base):
     )
 
     owner: Mapped[User] = relationship(back_populates="projects")
-    runs: Mapped[list[Run]] = relationship(back_populates="project")
+    chat: Mapped[Chat | None] = relationship(back_populates="project", uselist=False)
+
+
+class Chat(TimestampMixin, Base):
+    __tablename__ = "chats"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    creation_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, unique=True)
+
+    project: Mapped[Project] = relationship(back_populates="chat")
+    messages: Mapped[list[ChatMessage]] = relationship(
+        back_populates="chat", cascade="all, delete-orphan"
+    )
+    runs: Mapped[list[Run]] = relationship(back_populates="chat", cascade="all, delete-orphan")
 
 
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
     __table_args__ = (
         Index(
-            "uq_runs_active_project",
-            "project_id",
+            "uq_runs_active_chat",
+            "chat_id",
             unique=True,
-            postgresql_where=text(
-                "project_id IS NOT NULL AND status IN ('pending','running','awaiting_user')"
-            ),
-        ),
-        Index(
-            "uq_runs_active_owner_no_project",
-            "owner_id",
-            unique=True,
-            postgresql_where=text(
-                "project_id IS NULL AND status IN ('pending','running','awaiting_user')"
-            ),
+            postgresql_where=text("status IN ('pending','running','awaiting_user')"),
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey(
-            "conversations.id", ondelete="CASCADE", name="fk_runs_conversation_id_conversations"
-        ),
-        nullable=False,
-        index=True,
-    )
-    project_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    chat_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
     )
     message: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[RunStatus] = mapped_column(
         _pg_enum(RunStatus, "run_status"), nullable=False, default=RunStatus.PENDING
     )
-    attempts_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    attempts_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    execution_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, default=uuid.uuid4
+    )
     user_guidance: Mapped[str | None] = mapped_column(Text)
     plan: Mapped[dict | None] = mapped_column(JSONB)
     latest_code: Mapped[list | None] = mapped_column(JSONB, default=list)
@@ -137,32 +121,61 @@ class Run(TimestampMixin, Base):
     checks: Mapped[dict | None] = mapped_column(JSONB)
     chat_reply: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
-    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    archived: Mapped[bool] = mapped_column(nullable=False, default=False)
     locked_by: Mapped[str | None] = mapped_column(String(128))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    owner: Mapped[User] = relationship(back_populates="runs")
-    project: Mapped[Project | None] = relationship(back_populates="runs")
+    chat: Mapped[Chat] = relationship(back_populates="runs")
+    messages: Mapped[list[ChatMessage]] = relationship(back_populates="run")
     artifacts: Mapped[list[Artifact]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
     events: Mapped[list[RunEvent]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
-    reviews: Mapped[list[Review]] = relationship(back_populates="run", cascade="all, delete-orphan")
-    graph_runs: Mapped[list[GraphRun]] = relationship(
-        back_populates="run", cascade="all, delete-orphan"
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "sequence", name="uq_chat_message_sequence"),
+        UniqueConstraint("chat_id", "idempotency_key", name="uq_chat_message_idempotency"),
+        Index("ix_chat_messages_chat_created", "chat_id", "created_at"),
     )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    role: Mapped[MessageSender] = mapped_column(
+        _pg_enum(MessageSender, "message_sender"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    chat: Mapped[Chat] = relationship(back_populates="messages")
+    run: Mapped[Run | None] = relationship(back_populates="messages")
 
 
 class Artifact(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (
+        UniqueConstraint("run_id", "execution_id", "file_path", name="uq_artifact_execution_path"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    execution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     file_type: Mapped[FileType] = mapped_column(_pg_enum(FileType, "file_type"), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -174,157 +187,25 @@ class Artifact(Base):
 
 
 class RunEvent(Base):
-    __tablename__ = "events"
+    __tablename__ = "run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_run_event_sequence"),
+        Index("ix_run_events_run_execution", "run_id", "execution_id", "sequence"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    kind: Mapped[EventKind] = mapped_column(_pg_enum(EventKind, "event_kind"), nullable=False)
+    execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     run: Mapped[Run] = relationship(back_populates="events")
-
-
-class Review(Base):
-    __tablename__ = "reviews"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    verdict: Mapped[ReviewerVerdict] = mapped_column(
-        _pg_enum(ReviewerVerdict, "reviewer_verdict"), nullable=False
-    )
-    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    issues: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    suggested_code: Mapped[list | None] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    run: Mapped[Run] = relationship(back_populates="reviews")
-
-
-class Conversation(Base):
-    __tablename__ = "conversations"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True
-    )
-    selected_project_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL")
-    )
-    active_feature_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL")
-    )
-    context_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-    owner: Mapped[User] = relationship(back_populates="conversation")
-    selected_project: Mapped[Project | None] = relationship(foreign_keys=[selected_project_id])
-    turns: Mapped[list[ConversationTurn]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan"
-    )
-
-
-class ConversationTurn(Base):
-    __tablename__ = "conversation_turns"
-    __table_args__ = (
-        CheckConstraint(
-            "request_status IS NULL OR role = 'user'", name="ck_chat_request_is_user_turn"
-        ),
-        UniqueConstraint("conversation_id", "sequence", name="uq_turn_sequence"),
-        Index(
-            "uq_pending_chat_request_per_conversation",
-            "conversation_id",
-            unique=True,
-            postgresql_where=text("request_status IN ('received','classifying','needs_selection')"),
-        ),
-        Index("ix_chat_request_claim", "request_status", "heartbeat_at"),
-        Index(
-            "ix_turns_conversation_project_sequence", "conversation_id", "project_id", "sequence"
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    project_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), index=True
-    )
-    run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL")
-    )
-    role: Mapped[ConversationSender] = mapped_column(
-        _pg_enum(ConversationSender, "conversation_sender"), nullable=False
-    )
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    request_status: Mapped[ChatRequestStatus | None] = mapped_column(
-        _pg_enum(ChatRequestStatus, "chat_request_status")
-    )
-    context_snapshot: Mapped[dict | None] = mapped_column(JSONB)
-    intent_result: Mapped[dict | None] = mapped_column(JSONB)
-    locked_by: Mapped[str | None] = mapped_column(String(128))
-    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    conversation: Mapped[Conversation] = relationship(back_populates="turns")
-
-
-class GraphRun(Base):
-    __tablename__ = "graph_runs"
-    __table_args__ = (UniqueConstraint("run_id", "round", name="uq_graph_run_round"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    round: Mapped[int] = mapped_column(Integer, nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    run: Mapped[Run] = relationship(back_populates="graph_runs")
-    events: Mapped[list[GraphEvent]] = relationship(
-        back_populates="graph_run", cascade="all, delete-orphan"
-    )
-
-
-class GraphEvent(Base):
-    __tablename__ = "graph_events"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    graph_run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("graph_runs.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    node: Mapped[str] = mapped_column(String(128), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    graph_run: Mapped[GraphRun] = relationship(back_populates="events")
 
 
 class WorkerHeartbeat(Base):
@@ -351,13 +232,10 @@ class RateLimitCounter(Base):
 __all__ = [
     "Artifact",
     "Base",
-    "Conversation",
-    "ConversationTurn",
-    "GraphEvent",
-    "GraphRun",
+    "Chat",
+    "ChatMessage",
     "Project",
     "RateLimitCounter",
-    "Review",
     "Run",
     "RunEvent",
     "User",

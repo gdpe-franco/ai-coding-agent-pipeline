@@ -1,205 +1,235 @@
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
+from uuid import uuid4
+
+from sqlalchemy import select
 
 from app.application.processor import RunProcessor
-from app.domain.enums import ConversationSender, EventKind, RunStatus
+from app.domain.enums import RunStatus
+from app.infrastructure.persistence.models import Artifact, ChatMessage, Run
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
-from tests.conftest import create_test_user
-
-pytestmark = pytest.mark.usefixtures("require_database")
+from tests.conftest import create_test_chat, create_test_user
 
 
-class EmptyWorkspace:
+class FakeGraph:
+    def __init__(self, result: dict | Exception) -> None:
+        self.result = result
+        self.states: list[dict] = []
+
+    async def ainvoke(self, state: dict, config: dict) -> dict:
+        self.states.append(state)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class FakeWorkspace:
     def __init__(self) -> None:
-        self.files: dict[str, str] = {}
-        self.artifacts: dict[str, str] = {}
-        self.preview: dict[str, str] = {}
+        self.artifacts: dict[tuple[str, str], str] = {}
+        self.files = {"index.html": "<h1>approved</h1>"}
 
     async def read_all(self, project_id):
-        return self.files
+        return dict(self.files)
 
     async def publish(self, project_id, files, artifact_ids):
-        self.files = dict(files)
-        self.preview = dict(files)
+        self.published = (project_id, files, artifact_ids)
+        for path, content in files.items():
+            artifact_id = artifact_ids.get(path)
+            if artifact_id is not None:
+                self.artifacts[(str(artifact_id), path)] = content
 
     async def write_artifact(self, artifact_id, path, content):
-        self.artifacts[path] = content
+        self.artifacts[(str(artifact_id), path)] = content
 
 
-class EmptyMemory:
-    async def save_round(self, *args, **kwargs):
-        pass
+class FakeMemory:
+    async def save_project_memory(self, project_id, summary):
+        self.saved = (project_id, summary)
 
 
-@pytest.fixture
-async def processor_context(session_factory, repo_factory, settings):
-    async with session_factory() as session:
-        user = await create_test_user(session, "chat-results@example.com")
-        await session.commit()
-    processor = RunProcessor(
-        repo_factory=repo_factory,
-        graph=None,
-        workspace=EmptyWorkspace(),
-        memory=EmptyMemory(),
-        settings=settings,
-        worker_id="test-worker",
-    )
-    return session_factory, processor, user
-
-
-@pytest.mark.parametrize(
-    ("result", "expected_status", "expected_reply"),
-    [
-        pytest.param(
-            {
-                "approved": True,
-                "handoff": False,
-                "attempts_used": 1,
-                "attempts_total": 1,
-                "feedback": {"summary": "Looks good.", "issues": []},
-            },
-            RunStatus.COMPLETED,
-            "Approved. Generated 1 files. Looks good.",
-            id="approved",
-        ),
-        pytest.param(
-            {
-                "approved": False,
-                "handoff": True,
-                "attempts_used": 1,
-                "attempts_total": 1,
-                "feedback": {
-                    "verdict": "escalate",
-                    "summary": "The reviewer needs a product decision.",
-                    "issues": [{"message": "Choose a checkout flow", "file_path": "index.html"}],
-                },
-            },
-            RunStatus.AWAITING_USER,
-            "This run needs your guidance. The reviewer needs a product decision.",
-            id="escalation",
-        ),
-        pytest.param(
-            {
-                "approved": False,
-                "handoff": False,
-                "attempts_used": 3,
-                "attempts_total": 3,
-                "feedback": {
-                    "verdict": "reject",
-                    "summary": "The reviewer needs more detail.",
-                    "issues": [{"message": "Fix the heading", "file_path": "index.html"}],
-                },
-            },
-            RunStatus.AWAITING_USER,
-            "This run needs your guidance. The reviewer needs more detail.",
-            id="third-rejection",
-        ),
-    ],
-)
-async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
-    processor_context, result, expected_status, expected_reply
-) -> None:
-    session_factory, processor, user = processor_context
-    async with session_factory() as session:
-        repo = SqlAlchemyRepository(session)
-        project = await repo.create_project(user.id, "Result project")
-        run = await repo.create_run(user.id, "request", project.id)
-        await repo.update_run(
-            run.id,
-            status=RunStatus.RUNNING,
-            attempts_used=result["attempts_used"],
-            attempts_total=result["attempts_total"],
-            round=2,
-        )
-        current_project = await repo.create_project(user.id, "Currently selected project")
-        current_run = await repo.create_run(user.id, "Current feature", current_project.id)
-        await repo.update_run(current_run.id, status=RunStatus.COMPLETED)
-        conversation = await repo.get_conversation(user.id)
-        conversation.selected_project_id = current_project.id
-        conversation.active_feature_run_id = current_run.id
-        conversation.context_version = 7
-        await repo.commit()
-    plan = {"summary": "preserved plan", "steps": []}
+def _result(
+    *,
+    approved: bool,
+    handoff: bool = False,
+    content: str = "<h1>approved</h1>",
+    checksum: str = "a" * 64,
+) -> dict:
     code = [
         {
             "file_path": "index.html",
-            "content": "<h1>preserved</h1>",
-            "checksum": "a" * 64,
+            "content": content,
+            "checksum": checksum,
             "file_type": "html",
         }
     ]
-    checks = {"file_structure_ok": True, "js_syntax_ok": True, "issues": []}
-    previous_preview = {"approved.html": "<h1>last approved</h1>"}
-    processor.workspace.files = {"index.html": "<h1>preserved</h1>"}
-    processor.workspace.preview = dict(previous_preview)
-    graph_result = {
-        "project_id": str(project.id),
-        **result,
-        "attempts_total": result["attempts_total"],
-        "plan": plan,
+    return {
+        "approved": approved,
+        "handoff": handoff,
+        "project_id": None,
+        "plan": {"summary": "Build page", "steps": []},
         "code": code,
-        "checks": checks,
+        "feedback": {
+            "summary": "reviewed",
+            "issues": [],
+            "verdict": "approve" if approved else "escalate",
+        },
+        "checks": {"file_structure_ok": True, "js_syntax_ok": True, "issues": []},
     }
-    await processor._finalize(run.id, graph_result)
-    await processor._finalize(run.id, graph_result)
-    await processor._fail(run.id, RuntimeError("late worker failure"))
+
+
+async def _running_run(session_factory, email: str):
+    async with session_factory() as session:
+        owner = await create_test_user(session, email)
+        chat, project, run, _ = await create_test_chat(session, owner.id, "Build the app")
+    async with session_factory() as session:
+        running = await SqlAlchemyRepository(session).claim("worker")
+    assert running is not None and running.id == run.id
+    return chat, project, running
+
+
+async def test_processor_finalizes_run_in_its_chat_and_publishes_approved_files(
+    session_factory, repo_factory, tmp_path
+) -> None:
+    chat, project, running = await _running_run(session_factory, "processor@example.com")
+    graph = FakeGraph(_result(approved=True))
+    workspace, memory = FakeWorkspace(), FakeMemory()
+    processor = RunProcessor(
+        repo_factory,
+        graph,
+        workspace,
+        memory,
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
 
     async with session_factory() as session:
-        repo = SqlAlchemyRepository(session)
-        turns = await repo.list_conversation_turns(user.id)
-        saved_run = await repo.get_run_model(run.id)
-        conversation = await repo.get_conversation(user.id)
-        events = await repo.list_events(run.id)
-    assert [(turn.role, turn.content) for turn in turns] == [
-        (ConversationSender.USER, "request"),
-        (ConversationSender.USER, "Current feature"),
-        (ConversationSender.ASSISTANT, expected_reply),
+        saved = await session.get(Run, running.id)
+        messages = list(
+            (
+                await session.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.chat_id == chat.id)
+                    .order_by(ChatMessage.sequence)
+                )
+            ).scalars()
+        )
+    assert saved.status == RunStatus.COMPLETED
+    assert saved.chat_id == chat.id
+    assert workspace.published[0] == project.id
+    assert memory.saved == (project.id, "Completed request: Build the app\nResult: reviewed")
+    assert graph.states[0]["execution_id"] == str(running.execution_id)
+    assert [(message.role.value, message.run_id) for message in messages] == [
+        ("user", running.id),
+        ("assistant", running.id),
     ]
-    assert [turn.run_id for turn in turns] == [run.id, current_run.id, run.id]
-    assert [turn.project_id for turn in turns] == [project.id, current_project.id, project.id]
-    assert saved_run.status == expected_status
-    assert saved_run.plan == plan
-    assert saved_run.latest_code == code
-    assert saved_run.feedback == result["feedback"]
-    assert saved_run.checks == checks
-    assert saved_run.attempts_used == result["attempts_used"]
-    assert saved_run.attempts_total == result["attempts_total"]
-    assert saved_run.round == 2
-    assert processor.workspace.files == {"index.html": "<h1>preserved</h1>"}
-    if expected_status == RunStatus.AWAITING_USER:
-        assert processor.workspace.artifacts == {"index.html": "<h1>preserved</h1>"}
-        assert processor.workspace.preview == previous_preview
-    else:
-        assert processor.workspace.preview == processor.workspace.files
-    assert conversation.selected_project_id == current_project.id
-    assert conversation.active_feature_run_id == current_run.id
-    assert conversation.context_version == 7
-    replies = [event for event in events if event.kind == EventKind.CHAT_REPLY]
-    assert len(replies) == 1
-    assert replies[0].payload["message"] == expected_reply
-    assert sum(event.kind == EventKind.RUN_END for event in events) == 1
 
 
-async def test_failure_is_saved_as_assistant_turn(processor_context) -> None:
-    session_factory, processor, user = processor_context
-    async with session_factory() as session:
-        repo = SqlAlchemyRepository(session)
-        run = await repo.create_run(user.id, "request", None)
-        await repo.update_run(run.id, status=RunStatus.RUNNING)
-    await processor._fail(run.id, RuntimeError("provider unavailable"))
+async def test_processor_preserves_handoff_without_approval(session_factory, repo_factory) -> None:
+    _chat, _project, running = await _running_run(session_factory, "handoff@example.com")
+    memory = FakeMemory()
+    processor = RunProcessor(
+        repo_factory,
+        FakeGraph(_result(approved=False, handoff=True)),
+        FakeWorkspace(),
+        memory,
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
 
     async with session_factory() as session:
-        repo = SqlAlchemyRepository(session)
-        turns = await repo.list_conversation_turns(user.id)
-        saved_run = await repo.get_run_model(run.id)
-        events = await repo.list_events(run.id)
-    assert [(turn.role, turn.content) for turn in turns] == [
-        (ConversationSender.USER, "request"),
-        (ConversationSender.ASSISTANT, "RuntimeError: provider unavailable"),
+        saved = await session.get(Run, running.id)
+    assert saved.status == RunStatus.AWAITING_USER
+    assert saved.feedback["verdict"] == "escalate"
+    assert "needs your guidance" in saved.chat_reply
+    assert not hasattr(memory, "saved")
+
+
+async def test_continuation_keeps_artifacts_for_each_execution(
+    session_factory, repo_factory
+) -> None:
+    _chat, _project, first_execution = await _running_run(
+        session_factory, "execution-history@example.com"
+    )
+    workspace = FakeWorkspace()
+    settings = SimpleNamespace(worker_heartbeat_seconds=1)
+    first = RunProcessor(
+        repo_factory,
+        FakeGraph(_result(approved=False, handoff=True)),
+        workspace,
+        FakeMemory(),
+        settings,
+        "worker-a",
+    )
+    await first.process(first_execution)
+
+    async with repo_factory() as repo:
+        continued = await repo.continue_run(
+            first_execution.owner_id, first_execution.id, uuid4(), "Keep the layout"
+        )
+    assert continued is not None
+    second_execution = continued[1]
+    assert second_execution.execution_id != first_execution.execution_id
+    async with repo_factory() as repo:
+        running = await repo.claim("worker-b")
+    assert running is not None and running.id == first_execution.id
+    workspace.files["index.html"] = "<h1>revised</h1>"
+    second = RunProcessor(
+        repo_factory,
+        FakeGraph(_result(approved=True, content="<h1>revised</h1>", checksum="b" * 64)),
+        workspace,
+        FakeMemory(),
+        settings,
+        "worker-b",
+    )
+    await second.process(running)
+
+    async with session_factory() as session:
+        artifacts = list(
+            (
+                await session.execute(select(Artifact).where(Artifact.run_id == first_execution.id))
+            ).scalars()
+        )
+    assert {artifact.execution_id for artifact in artifacts} == {
+        first_execution.execution_id,
+        second_execution.execution_id,
+    }
+    assert len({artifact.id for artifact in artifacts}) == 2
+    assert set(workspace.artifacts.values()) == {
+        "<h1>approved</h1>",
+        "<h1>revised</h1>",
+    }
+
+
+async def test_processor_records_failure_and_keeps_chat_message(
+    session_factory, repo_factory
+) -> None:
+    chat, _project, running = await _running_run(session_factory, "failure@example.com")
+    processor = RunProcessor(
+        repo_factory,
+        FakeGraph(RuntimeError("provider unavailable")),
+        FakeWorkspace(),
+        FakeMemory(),
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
+
+    async with session_factory() as session:
+        saved = await session.get(Run, running.id)
+        messages = list(
+            (
+                await session.execute(select(ChatMessage).where(ChatMessage.chat_id == chat.id))
+            ).scalars()
+        )
+    assert saved.status == RunStatus.FAILED
+    assert "provider unavailable" in saved.error
+    assert [message.content for message in messages] == [
+        "Build the app",
+        "RuntimeError: provider unavailable",
     ]
-    assert [turn.run_id for turn in turns] == [run.id, run.id]
-    assert saved_run.status == RunStatus.FAILED
-    assert [event.kind for event in events].count(EventKind.ERROR) == 1
-    assert [event.kind for event in events].count(EventKind.CHAT_REPLY) == 1
-    assert [event.kind for event in events].count(EventKind.RUN_END) == 1

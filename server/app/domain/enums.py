@@ -26,38 +26,24 @@ class ReviewerVerdict(StrEnum):
     ESCALATE = "escalate"
 
 
-class ConversationSender(StrEnum):
+class MessageSender(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
 
 
-class ChatRequestStatus(StrEnum):
-    RECEIVED = "received"
-    CLASSIFYING = "classifying"
-    NEEDS_SELECTION = "needs_selection"
-    ENQUEUED = "enqueued"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-
-class ChatIntentAction(StrEnum):
-    CONTINUE_CURRENT = "continue_current"
-    REQUEST_SELECTION = "request_selection"
-
-
 class EventKind(StrEnum):
-    PROJECT_RESOLVED = "project_resolved"
-    PLANNER = "planner"
-    CODER = "coder"
-    REVIEWER = "reviewer"
-    CHAT_REPLY = "chat_reply"
+    RUN_QUEUED = "run_queued"
+    EXECUTION_STARTED = "execution_started"
+    STEP_STARTED = "step_started"
+    STEP_COMPLETED = "step_completed"
+    GENERATION = "generation"
     HANDOFF = "handoff"
     GUIDANCE = "guidance"
-    RUN_START = "run_start"
-    RUN_END = "run_end"
-    ERROR = "error"
-    ABANDONMENT = "abandonment"
+    RUN_COMPLETED = "run_completed"
+    RUN_FAILED = "run_failed"
+    RUN_CLOSED = "run_closed"
+    ARTIFACT_PUBLISHED = "artifact_published"
 
 
 class FileType(StrEnum):

@@ -10,10 +10,8 @@ from app.infrastructure.persistence.models import Project, User
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from app.interfaces.dependencies import get_current_user, get_repo
 from app.interfaces.schemas.models import (
-    ConversationTurnRead,
     FileList,
     PreviewUrlRead,
-    ProjectCreate,
     ProjectRead,
 )
 
@@ -27,6 +25,7 @@ def _not_found() -> HTTPException:
 def _project_read(project: Project) -> ProjectRead:
     return ProjectRead(
         id=project.id,
+        chat_id=project.chat.id,
         title=project.title,
         summary=project.summary,
         preview_id=project.preview_id,
@@ -34,16 +33,6 @@ def _project_read(project: Project) -> ProjectRead:
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
-
-
-@router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
-async def create_project(
-    payload: ProjectCreate,
-    user: User = Depends(get_current_user),
-    repo: SqlAlchemyRepository = Depends(get_repo),
-) -> ProjectRead:
-    project = await repo.create_project(user.id, payload.title, payload.summary)
-    return _project_read(project)
 
 
 @router.get("", response_model=list[ProjectRead])
@@ -73,10 +62,13 @@ async def delete_project(
     user: User = Depends(get_current_user),
     repo: SqlAlchemyRepository = Depends(get_repo),
 ) -> None:
-    project = await repo.get_owned_project_for_update(project_id, user.id)
+    project = await repo.get_owned_project(project_id, user.id)
     if project is None:
         raise _not_found()
-    if await repo.active_run_for_project(project_id) is not None:
+    chat = await repo.get_owned_chat_for_project_for_update(user.id, project_id)
+    if chat is None:
+        raise _not_found()
+    if await repo.active_run_for_chat(chat.id) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A project with a non-terminal run cannot be deleted",
@@ -86,8 +78,8 @@ async def delete_project(
     for artifact_id in artifact_ids:
         await container.workspace.delete_artifact(artifact_id)
     await container.workspace.delete_project(project_id)
-    await container.memory.delete_project(user.id, project_id)
-    await repo.delete_project(project_id)
+    await container.memory.delete_project(project_id)
+    await repo.delete_chat(user.id, chat.id)
 
 
 @router.get("/{project_id}/files", response_model=FileList)
@@ -122,30 +114,6 @@ async def read_file(
         raise _not_found() from exc
     except WorkspaceError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
-@router.get("/{project_id}/conversation", response_model=list[ConversationTurnRead])
-async def conversation(
-    project_id: UUID,
-    user: User = Depends(get_current_user),
-    repo: SqlAlchemyRepository = Depends(get_repo),
-) -> list[ConversationTurnRead]:
-    project = await repo.get_owned_project(project_id, user.id)
-    if project is None:
-        raise _not_found()
-    turns = await repo.list_conversation_turns(user.id, project_id)
-    return [
-        ConversationTurnRead(
-            id=turn.id,
-            role=turn.role.value,
-            content=turn.content,
-            sequence=turn.sequence,
-            project_id=turn.project_id,
-            run_id=turn.run_id,
-            created_at=turn.created_at,
-        )
-        for turn in turns
-    ]
 
 
 @router.get("/{project_id}/preview-url", response_model=PreviewUrlRead)

@@ -33,11 +33,5 @@ class MissingCredentialsError(DomainError):
         super().__init__(f"missing required setting: {setting}")
 
 
-class ResolverError(DomainError):
-    def __init__(self, message: str, tag: str = "resolver_error") -> None:
-        self.tag = tag
-        super().__init__(message)
-
-
 class WorkspaceError(DomainError):
     pass
