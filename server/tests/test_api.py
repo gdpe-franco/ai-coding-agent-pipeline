@@ -271,6 +271,9 @@ def test_selection_is_owner_scoped_and_rejects_stale_context(client: TestClient)
     alice_state = client.get("/api/v1/chat", headers=alice_headers).json()
     assert alice_state["pending_selection"]["turn_id"] == turn_id
     assert alice_state["pending_selection"]["context_version"] == 1
+    assert alice_state["pending_selection"]["reason"] == (
+        "The chat context changed; refresh the project menu"
+    )
     assert alice_state["turns"][0]["request_status"] == "needs_selection"
     assert client.get("/api/v1/chat", headers=bob_headers).json()["turns"] == []
     refreshed = _confirm_new_project(
@@ -283,6 +286,59 @@ def test_selection_is_owner_scoped_and_rejects_stale_context(client: TestClient)
     assert refreshed.status_code == 202
     with psycopg.connect(Settings().psycopg_url) as connection:
         assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+def test_project_run_cap_preserves_pending_request(client: TestClient, settings: Settings) -> None:
+    settings.max_runs_per_project = 1
+    token = register_and_login(client, "cap@example.com")
+    headers = auth_headers(token)
+    project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "At cap", "summary": ""}
+    ).json()
+    seed = client.post(
+        "/api/v1/runs",
+        headers=headers,
+        json={"message": "first run", "project_id": project["id"]},
+    ).json()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute("UPDATE runs SET status='completed' WHERE id=%s", (seed["run_id"],))
+        connection.execute(
+            "UPDATE conversations SET selected_project_id=%s, active_feature_run_id=%s, context_version=1"
+            " WHERE owner_id=(SELECT id FROM users WHERE email='cap@example.com')",
+            (project["id"], seed["run_id"]),
+        )
+        connection.commit()
+
+    request = client.post(
+        "/api/v1/chat/messages",
+        headers=headers,
+        json={"message": "continue", "request_selection": True},
+    ).json()
+    pending = client.get("/api/v1/chat", headers=headers).json()["pending_selection"]
+    payload = {
+        "context_version": pending["context_version"],
+        "choice": "continue_current",
+        "feature_mode": "continue",
+    }
+    conflict = client.post(
+        f"/api/v1/chat/messages/{request['turn_id']}/selection", headers=headers, json=payload
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "Project run cap reached"
+    chat = client.get("/api/v1/chat", headers=headers).json()
+    assert chat["pending_selection"]["turn_id"] == request["turn_id"]
+    assert chat["pending_selection"]["reason"] == "Project run cap reached"
+    assert chat["context_version"] == pending["context_version"] == 1
+    assert chat["selected_project_id"] == project["id"]
+    assert (
+        client.post(
+            f"/api/v1/chat/messages/{request['turn_id']}/selection", headers=headers, json=payload
+        ).status_code
+        == 409
+    )
+    with psycopg.connect(Settings().psycopg_url) as connection:
         assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 

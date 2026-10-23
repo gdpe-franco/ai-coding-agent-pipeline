@@ -424,6 +424,21 @@ class SqlAlchemyRepository:
             return None
         return conversation, turn
 
+    async def _persist_selection_reason(
+        self, owner_id: uuid.UUID, turn_id: uuid.UUID, reason: str
+    ) -> None:
+        await self.session.rollback()
+        locked = await self._lock_owned_turn(owner_id, turn_id)
+        if locked is None:
+            return
+        _, turn = locked
+        if turn.request_status != ChatRequestStatus.NEEDS_SELECTION:
+            return
+        intent_result = dict(turn.intent_result or {})
+        intent_result.update({"action": ChatIntentAction.REQUEST_SELECTION.value, "reason": reason})
+        turn.intent_result = intent_result
+        await self.session.commit()
+
     async def confirm_chat_selection(
         self,
         owner_id: uuid.UUID,
@@ -455,7 +470,9 @@ class SqlAlchemyRepository:
             raise InvalidTransitionError("The chat request is not awaiting selection")
 
         if context_version != conversation.context_version:
-            raise InvalidTransitionError("The chat context changed; refresh the project menu")
+            reason = "The chat context changed; refresh the project menu"
+            await self._persist_selection_reason(owner_id, turn_id, reason)
+            raise InvalidTransitionError(reason)
 
         if choice == "continue_current":
             target_id = conversation.selected_project_id
@@ -482,9 +499,13 @@ class SqlAlchemyRepository:
         if project is None:
             return None
         if await self.active_run_for_project(target_id) is not None:
-            raise RunConflictError("A run is already active for this project")
+            reason = "A run is already active for this project"
+            await self._persist_selection_reason(owner_id, turn_id, reason)
+            raise RunConflictError(reason)
         if await self.count_runs_for_project(target_id) >= max_runs_per_project:
-            raise RunConflictError("Project run cap reached")
+            reason = "Project run cap reached"
+            await self._persist_selection_reason(owner_id, turn_id, reason)
+            raise RunConflictError(reason)
 
         previous = (
             await self.latest_run_for_project(target_id) if feature_mode == "continue" else None
@@ -513,7 +534,9 @@ class SqlAlchemyRepository:
         except IntegrityError as exc:
             await self.session.rollback()
             if self._active_run_conflict(exc):
-                raise RunConflictError("A run is already active for this project") from exc
+                reason = "A run is already active for this project"
+                await self._persist_selection_reason(owner_id, turn_id, reason)
+                raise RunConflictError(reason) from exc
             raise
 
         turn.project_id = target_id

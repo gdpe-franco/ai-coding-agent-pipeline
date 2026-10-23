@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import update
 
+from app.application.ports import RateLimitResult
 from app.domain.enums import RunStatus
 from app.infrastructure.persistence.models import Run
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
@@ -14,6 +16,8 @@ from app.infrastructure.rate_limit.postgres import (
     PostgresRateLimiter,
     RateLimitUnavailable,
 )
+from app.main import create_app
+from app.settings import Settings
 from tests.conftest import create_test_user
 
 pytestmark = pytest.mark.usefixtures("require_database")
@@ -110,3 +114,29 @@ def test_hmac_keys_are_scoped() -> None:
     limiter = PostgresRateLimiter(Factory(), "secret")
     assert limiter._hash("auth", "ip") != limiter._hash("read", "ip")
     assert len(limiter._hash("auth", "ip")) == 32
+
+
+def test_forwarded_ip_is_used_only_from_a_trusted_proxy(tmp_path) -> None:
+    settings = Settings(
+        secret_key="test-secret-key-that-is-long-enough-32",
+        rate_limit_enabled=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+        data_dir=tmp_path / "data",
+        static_dir=tmp_path / "static",
+    )
+    observed: list[tuple[str, str]] = []
+
+    async def allow(bucket: str, key: str) -> RateLimitResult:
+        observed.append((bucket, key))
+        return RateLimitResult(True, 120, 119, datetime.now(UTC), 60)
+
+    for peer in ("10.0.0.8", "192.0.2.8"):
+        app = create_app(settings)
+        app.state.container.rate_limiter.consume = allow
+        with TestClient(app, client=(peer, 50000)) as client:
+            response = client.get(
+                "/api/v1/projects", headers={"X-Forwarded-For": "198.51.100.10, 203.0.113.2"}
+            )
+            assert response.status_code == 401
+
+    assert observed == [("read", "198.51.100.10"), ("read", "192.0.2.8")]

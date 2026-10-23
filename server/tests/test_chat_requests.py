@@ -356,6 +356,8 @@ def test_manual_selection_changes_project_and_feature_only_on_confirmation(
         headers=headers,
         json={"message": "Queue another run", "request_selection": True},
     ).json()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        runs_before_conflict = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
     blocked = _manual_selection(
         client,
         headers,
@@ -367,7 +369,10 @@ def test_manual_selection_changes_project_and_feature_only_on_confirmation(
     assert blocked.status_code == 409
     blocked_chat = client.get("/api/v1/chat", headers=headers).json()
     assert blocked_chat["pending_selection"]["turn_id"] == blocked_turn["turn_id"]
+    assert blocked_chat["pending_selection"]["reason"] == "A run is already active for this project"
     assert blocked_chat["context_version"] == 5
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == runs_before_conflict
 
 
 def test_foreign_project_selection_keeps_pending_request(client: TestClient) -> None:
