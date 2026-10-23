@@ -231,6 +231,7 @@ class CodingGraph:
                         step.name,
                         step.file_path,
                         step.file_type.value,
+                        plan.summary,
                         step.description,
                         existing,
                         state.get("memory", ""),

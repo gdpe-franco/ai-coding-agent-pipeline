@@ -54,13 +54,13 @@ class CoderResponse(StrictModel):
 
 class ReviewerIssue(StrictModel):
     message: str = Field(min_length=1, max_length=1000)
-    file_path: str | None = None
+    file_path: str | None
 
 
 class ReviewerResponse(StrictModel):
     verdict: Literal["approve", "reject", "escalate"]
     summary: str = Field(min_length=1, max_length=2000)
-    issues: list[ReviewerIssue] = Field(default_factory=list, max_length=20)
+    issues: list[ReviewerIssue] = Field(max_length=20)
 
 
 RESOLVER_SCHEMA = ResolverResponse.model_json_schema()

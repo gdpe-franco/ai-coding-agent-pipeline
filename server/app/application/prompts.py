@@ -90,6 +90,7 @@ def coder_messages(
     step_name: str,
     file_path: str,
     file_type: str,
+    plan_summary: str,
     description: str,
     existing_files: dict[str, str],
     memory: str,
@@ -107,6 +108,7 @@ def coder_messages(
         {
             "role": "user",
             "content": (
+                f"Plan summary: {plan_summary}\n\n"
                 f"File step: {step_name}\nPath: {file_path}\nType: {file_type}\n"
                 f"Description: {description}\n\nGuidance:\n{guidance or 'None'}\n\n"
                 f"Existing project files:\n{_json(existing_files)}\n\nProject memory:\n{memory or 'None'}"

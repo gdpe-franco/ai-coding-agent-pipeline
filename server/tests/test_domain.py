@@ -3,6 +3,11 @@ from __future__ import annotations
 import pytest
 
 from app.application.agent_schemas import (
+    CODER_SCHEMA,
+    INTENT_SCHEMA,
+    PLANNER_SCHEMA,
+    RESOLVER_SCHEMA,
+    REVIEWER_SCHEMA,
     CoderResponse,
     PlannerResponse,
     ResolverResponse,
@@ -85,14 +90,26 @@ def test_coder_schema_rejects_empty_content() -> None:
 
 @pytest.mark.parametrize("verdict", list(ReviewerVerdict), ids=lambda verdict: verdict.value)
 def test_reviewer_schema_accepts_verdict(verdict: ReviewerVerdict) -> None:
-    assert ReviewerResponse(verdict=verdict.value, summary="s").verdict == verdict.value
+    assert ReviewerResponse(verdict=verdict.value, summary="s", issues=[]).verdict == verdict.value
 
 
 def test_reviewer_schema_rejects_unknown_verdict() -> None:
     with pytest.raises(ValueError):
-        ReviewerResponse(verdict="maybe", summary="s")
+        ReviewerResponse(verdict="maybe", summary="s", issues=[])
 
 
 def test_resolver_schema_allows_null_project() -> None:
     parsed = ResolverResponse(project_id=None, title="New", confidence=0.4, reason="no match")
     assert parsed.project_id is None
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [RESOLVER_SCHEMA, INTENT_SCHEMA, PLANNER_SCHEMA, CODER_SCHEMA, REVIEWER_SCHEMA],
+    ids=["resolver", "intent", "planner", "coder", "reviewer"],
+)
+def test_model_schemas_require_every_property(schema: dict) -> None:
+    objects = [schema, *schema.get("$defs", {}).values()]
+    for obj in objects:
+        if obj.get("type") == "object":
+            assert set(obj.get("required", [])) == set(obj.get("properties", {}))

@@ -5,7 +5,7 @@
 - Read `docs/architecture.md` (TDD) for stack, contracts, schema, and rationale. Keep contributor conventions here; update existing sections when decisions change. Link rather than duplicate architecture in README/PRD.
 - `tasks/` is ignored scratch for PRDs and briefs, not durable memory. The PRD owns user stories/acceptance criteria only. `shared/` is reserved.
 - Backend: `server/app/{domain,application,infrastructure,interfaces}`; tests: `server/tests/`; evals: `server/evals/`; SPA: `client/`. Entrypoints: `app.main:create_app()` and `app.worker`.
-- Azure is implemented but unverified; credentials/deployment names are unavailable. Never invent them. API budget policy remains undecided (TDD §13.2).
+- Azure is the only provider and has been live-smoke-tested with local credentials; never commit them or invent deployment names. API budget policy remains undecided (TDD §13.2).
 
 ## Commands and verification
 
@@ -45,7 +45,7 @@ python -m evals.runner
 
 - Dependencies point inward: interfaces → application → domain; infrastructure implements application ports. Application imports no infrastructure/interfaces; domain imports no frameworks, SDKs, or I/O.
 - Use narrow `typing.Protocol` ports and manual adapter wiring in `infrastructure/container.py`; no mutable globals. Domain models are dataclasses; Pydantic v2 validates HTTP/model/checkpoint boundaries. Adapter recipe: TDD §4.4.
-- Credentials, provider URLs, and SDK types stay in infrastructure. Missing credentials produce masked setting-specific errors. Providers are OpenAI-compatible; Azure `model` means deployment name. Provider/model/credential configuration is developer-only; no user settings or model-listing endpoints.
+- Credentials, provider URLs, and SDK types stay in infrastructure. Missing credentials produce masked setting-specific errors. Azure OpenAI is the only provider in the MVP; `model` means deployment name. Deployment/credential configuration is developer-only; no user settings or model-listing endpoints.
 
 ## Workflow guardrails
 

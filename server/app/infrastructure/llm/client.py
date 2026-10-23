@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
+from openai.types.chat import ChatCompletion
 
 from app.application.ports import LLMClient
 from app.domain.errors import MissingCredentialsError, ModelError
+
+
+def _rejects_temperature(error: BadRequestError) -> bool:
+    body = error.body if isinstance(error.body, dict) else {}
+    return body.get("code") == "unsupported_value" and body.get("param") == "temperature"
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -16,9 +22,39 @@ class OpenAICompatibleClient(LLMClient):
         model: str,
         base_url: str | None = None,
         timeout: float = 120.0,
+        unsupported_temperature: set[str] | None = None,
     ) -> None:
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self._unsupported_temperature = (
+            unsupported_temperature if unsupported_temperature is not None else set()
+        )
+
+    async def _completion(
+        self, role: str, messages: list[dict[str, str]], schema: dict[str, Any]
+    ) -> ChatCompletion:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": f"{role}_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
+        if self.model not in self._unsupported_temperature:
+            kwargs["temperature"] = 0
+        try:
+            return await self.client.chat.completions.create(**kwargs)
+        except BadRequestError as exc:
+            if "temperature" not in kwargs or not _rejects_temperature(exc):
+                raise
+            self._unsupported_temperature.add(self.model)
+            kwargs.pop("temperature")
+            return await self.client.chat.completions.create(**kwargs)
 
     async def complete(
         self, role: str, messages: list[dict[str, str]], schema: dict[str, Any]
@@ -34,19 +70,7 @@ class OpenAICompatibleClient(LLMClient):
                             "content": "Return only valid JSON matching the supplied schema.",
                         }
                     )
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=request_messages,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": f"{role}_response",
-                            "strict": True,
-                            "schema": schema,
-                        },
-                    },
-                    temperature=0,
-                )
+                response = await self._completion(role, request_messages, schema)
                 content = response.choices[0].message.content
                 if not content:
                     raise ModelError(f"{role} returned an empty response", tag=f"{role}_error")
@@ -75,55 +99,31 @@ class ProviderRegistry:
     def __init__(self, settings) -> None:
         self.settings = settings
 
-    def _provider(self) -> str:
-        provider = self.settings.model_provider.strip().lower()
-        if provider:
-            return provider
-        if self._azure_ready("planner"):
-            return "azure_openai"
-        if self.settings.openai_api_key:
-            return "openai"
-        return "unavailable"
-
-    def _azure_deployment(self, role: str) -> str:
+    def _deployment(self, role: str) -> str:
         return str(getattr(self.settings, f"azure_openai_deployment_{role}", "") or "").strip()
 
-    def _azure_ready(self, role: str) -> bool:
-        return bool(
-            self.settings.azure_openai_api_key
-            and self.settings.azure_openai_endpoint
-            and self._azure_deployment(role)
-        )
+    def _missing_setting(self, role: str) -> str | None:
+        if not self.settings.azure_openai_api_key:
+            return "AZURE_OPENAI_API_KEY"
+        if not self.settings.azure_openai_endpoint:
+            return "AZURE_OPENAI_ENDPOINT"
+        if not self._deployment(role):
+            return f"AZURE_OPENAI_DEPLOYMENT_{role.upper()}"
+        return None
 
     def build(self) -> dict[str, LLMClient]:
         clients: dict[str, LLMClient] = {}
-        provider = self._provider()
+        unsupported_temperature: set[str] = set()
         for role in ("planner", "coder", "reviewer", "resolver"):
-            if provider == "azure_openai":
-                deployment_role = "planner" if role == "resolver" else role
-                deployment = self._azure_deployment(deployment_role)
-                if not (
-                    self.settings.azure_openai_api_key
-                    and self.settings.azure_openai_endpoint
-                    and deployment
-                ):
-                    clients[role] = UnavailableLLMClient(
-                        f"AZURE_OPENAI_DEPLOYMENT_{deployment_role.upper()}"
-                    )
-                    continue
-                clients[role] = OpenAICompatibleClient(
-                    api_key=self.settings.azure_openai_api_key,
-                    base_url=self.settings.azure_openai_endpoint,
-                    model=deployment,
-                )
-            elif provider == "openai":
-                if not self.settings.openai_api_key:
-                    clients[role] = UnavailableLLMClient("OPENAI_API_KEY")
-                    continue
-                clients[role] = OpenAICompatibleClient(
-                    api_key=self.settings.openai_api_key,
-                    model=self.settings.model_name or "gpt-4o-mini",
-                )
-            else:
-                clients[role] = UnavailableLLMClient("AZURE_OPENAI_API_KEY or OPENAI_API_KEY")
+            deployment_role = "planner" if role == "resolver" else role
+            missing = self._missing_setting(deployment_role)
+            if missing is not None:
+                clients[role] = UnavailableLLMClient(missing)
+                continue
+            clients[role] = OpenAICompatibleClient(
+                api_key=self.settings.azure_openai_api_key,
+                base_url=self.settings.azure_openai_endpoint,
+                model=self._deployment(deployment_role),
+                unsupported_temperature=unsupported_temperature,
+            )
         return clients

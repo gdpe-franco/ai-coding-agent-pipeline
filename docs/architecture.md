@@ -57,12 +57,12 @@ demo that shows an honest handoff.
   Cloudflare Tunnel supplies public HTTPS access.
 - **PostgreSQL 17 is the only datastore.** No Redis, no broker, no object store in the MVP. This keeps one
   backup story and one failure mode.
-- **Azure OpenAI is the initial provider.** Live verification depends on credentials and deployment names
-  supplied by the developer (§13.2); deterministic tests use fake model ports.
+- **Azure OpenAI is the only provider in the MVP.** Live verification depends on credentials and deployment
+  names supplied by the developer (§13.2); deterministic tests use fake model ports.
 - **Node is required at runtime** for `node --check`; the runtime image must include it.
 - **The preview cannot be trusted with secrets.** Generated projects are static, unauthenticated, and
   capability-addressed.
-- **Only the developer configures providers.** Model selection and credentials come from environment
+- **Only the developer configures the provider.** Azure deployments and credentials come from environment
   configuration, never from the product UI or per-project settings.
 
 ## 3. System design
@@ -293,7 +293,7 @@ server/app/
 │   ├── memory.py          # load/save memory use cases
 │   └── use_cases/         # start_run, resume_run, close_run, finalize_run, ...
 ├── infrastructure/
-│   ├── llm/               # provider registry and OpenAI-compatible adapters
+│   ├── llm/               # Azure LLM registry and OpenAI-compatible adapter
 │   ├── persistence/       # SQLAlchemy async repositories
 │   ├── queue/             # Postgres run claim/heartbeat adapter
 │   ├── workspace/         # WebWorkspace filesystem adapter
@@ -324,25 +324,19 @@ server/app/
 
 ### 4.3 Providers and secrets
 
-The infrastructure registry builds one `LLMClient` per role from **developer environment configuration only**.
-One global `(provider, model)` selection applies to all roles, with per-role Azure deployment names; end users
-have no choice. Azure OpenAI is the initial provider, with plain OpenAI as the configured fallback.
-Other OpenAI-compatible providers require adapter verification before use; compatibility is not assumed.
+The infrastructure registry builds one Azure OpenAI `LLMClient` per role from **developer environment
+configuration only**. End users have no provider choice. Per-role Azure deployment names are the only
+per-role setting; the pre-run intent detector uses the Planner deployment and has no project-selection
+authority. Another provider requires a new adapter and verification; compatibility is not assumed.
 
-Model resolution:
+If `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, or a role's deployment name is missing, that role gets an
+unavailable client that raises a masked setting-specific error. There is no fallback provider. There are no
+per-role provider overrides, no per-project credentials, no project settings endpoints, and no `/models`
+endpoint.
 
-1. Global environment: `MODEL_PROVIDER` / `MODEL_NAME`.
-2. Provider default: `azure_openai` with `AZURE_OPENAI_DEPLOYMENT_<ROLE>` when Azure credentials and the role
-   deployment exist; otherwise `openai` with `gpt-4o-mini`.
-
-Per-role deployment names are the only per-role setting. There are no per-role provider/model overrides in the
-MVP, no per-project credentials, no project settings endpoints, and no `/models` endpoint. The pre-run intent
-detector uses the Planner deployment; it has no project-selection authority.
-
-Azure notes: use the standard `openai` client against the resource's `/openai/v1/` base URL, preferring the
-Responses API with `text.format` JSON Schema and falling back to `chat.completions` with JSON Schema. For
-Azure, the request `model` field is the **deployment name**, not the underlying model name. See §13.2 for
-the live-verification dependency.
+Azure notes: use the standard `openai` client against the resource's `/openai/v1/` base URL with
+`chat.completions` and JSON Schema structured output. For Azure, the request `model` field is the
+**deployment name**, not the underlying model name. See §13.2 for the live-verification dependency.
 
 Never pass an API key, token, URL, or provider SDK type into domain or application code. Infrastructure resolves
 environment credentials and injects ports. Only infrastructure reads `*_API_KEY` values.
@@ -350,7 +344,7 @@ environment credentials and injects ports. Only infrastructure reads `*_API_KEY`
 ### 4.4 Adding an adapter
 
 1. Implement the port under `infrastructure/`; keep SDK, database, filesystem, URL, and credential values there.
-2. Register its factory in `infrastructure/container.py`; register model providers in the provider registry too.
+2. Register its factory in `infrastructure/container.py` and in the provider registry.
 3. Add a focused external-boundary test and a fake-port fixture for the use case.
 4. Run `ruff` and `pytest` from `server/` before swapping an adapter in.
 
@@ -983,10 +977,8 @@ the preview uses a separate hostname. Ephemeral hosting requires durable externa
 | `FRONTEND_ORIGIN` | Allowed SPA origin, e.g. `http://localhost:5173` in Vite development. |
 | `PREVIEW_HOST` | Preview origin, e.g. `http://preview.localhost:8000`. |
 | `MAX_RUNS_PER_PROJECT`, `MAX_CODER_ATTEMPTS` | Hard run cap `100`; Coder generations per round `3`. |
-| `MODEL_PROVIDER`, `MODEL_NAME` | Global model selection. Default provider is `azure_openai` when Azure credentials/deployments exist, otherwise `openai`; OpenAI fallback model `gpt-4o-mini`. |
 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
 | `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names. Pre-run intent detection reuses the Planner deployment. |
-| `OPENAI_API_KEY` | Optional fallback when Azure is not configured. |
 | `RATE_LIMIT_ENABLED` | `true`; all bucket limits use code defaults. |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated trusted proxy networks; empty trusts no forwarded headers. Local tunnel example: `127.0.0.1/32,::1/128`. |
 
@@ -1034,7 +1026,7 @@ the worker with `python -m app.worker`, and runs Vite from `client/`.
 | PostgreSQL-backed work queues | Durable claims and reclaim without a second datastore or broker. | Application-owned heartbeat logic and idempotent finalization. |
 | LangGraph with PostgreSQL saver/store | Checkpointed node execution and project memory; a new thread per round makes full-flow resume explicit. | Separate Psycopg and asyncpg lifecycles. |
 | One user chat, manual context selection | Keep cross-project work in one interaction without allowing a model to choose the target. Retaining context avoids a picker on every follow-up. | Pre-run intent calls and occasional unnecessary menus. |
-| Developer-configured OpenAI-compatible adapter | Support Azure and OpenAI without user-facing credentials or vendor SDK types in application code. | Live provider compatibility must be verified. |
+| Single Azure provider behind an LLM port | Keep provider SDK details and credentials out of application code; adding another provider is an adapter change. | Multi-provider flexibility is deferred; a new provider needs live verification. |
 | Complete-file generation with a plan-set guard | Reviewable output and deterministic protection of unrelated files. | More tokens than patch-based edits. |
 | Deterministic checks inside Reviewer | Establish file/type/syntax facts before LLM judgment without an extra agent. | Runtime Node is required; syntax checks do not prove app behavior. |
 | Three Coder attempts and a full-flow resume | Bound work and expose unresolved issues without false approval; guidance can change the plan. | Resuming repeats planning and generation. |
@@ -1117,7 +1109,7 @@ procedure is in §14; product acceptance criteria remain in the PRD.
 
 | Item | Impact |
 |---|---|
-| Azure deployment names are unset (`AZURE_OPENAI_DEPLOYMENT_PLANNER`, `_CODER`, `_REVIEWER`). | The Azure adapter is unverified until they are supplied with a test key; tests use fake ports meanwhile. |
+| Azure live verification used one deployment for all roles. | Per-role model quality, sustained load, and spend behavior are not yet evaluated; deterministic tests use fake ports. |
 | API budget policy is undecided. | The MVP uses the static run cap and request rate limits; spend metering/enforcement needs a separate product decision. |
 
 ## 14. Presentation guide

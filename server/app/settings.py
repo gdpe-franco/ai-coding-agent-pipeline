@@ -30,14 +30,11 @@ class Settings(BaseSettings):
     max_coder_attempts: int = 3
     max_runs_per_project: int = 100
 
-    model_provider: str = ""
-    model_name: str = ""
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
     azure_openai_deployment_planner: str = ""
     azure_openai_deployment_coder: str = ""
     azure_openai_deployment_reviewer: str = ""
-    openai_api_key: str = ""
 
     rate_limit_enabled: bool = True
     trusted_proxy_cidrs: str = ""

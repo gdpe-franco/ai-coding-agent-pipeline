@@ -3,8 +3,9 @@
 Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
 and returns a preview or a handoff with the open issues.
 
-> **Status:** MVP in progress. Private accounts, persistent chat, pre-run intent detection, and confirmed
-> project/feature selection from chat are implemented. Provider verification remains follow-on work.
+> **Status:** MVP in progress. Private accounts, persistent chat, pre-run intent detection, confirmed
+> project/feature selection from chat, and an Azure live run are implemented. Broader provider evaluation
+> remains follow-on work.
 
 ## How it works
 
@@ -42,8 +43,8 @@ stories and acceptance criteria.
 ## Run the local stack
 
 1. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and use `openssl rand -hex 32` to generate `SECRET_KEY`.
-   Authentication and chat work without model credentials; configure a provider and deployments before using
-   coding runs. See the [environment table](docs/architecture.md#93-environment-variables).
+   Authentication and chat work without model credentials; configure Azure OpenAI and its deployments before
+   using coding runs. See the [environment table](docs/architecture.md#93-environment-variables).
 2. Build and start:
 
    ```bash
@@ -81,7 +82,7 @@ Run the SPA with `npm ci && npm run dev` from `client/`; Vite proxies `/api` to 
 
 - JWT authentication; projects, runs, files, and traces are owner-scoped.
 - Per-IP and per-user rate limits; over-limit requests return `429` with `Retry-After`.
-- Only the developer configures providers, credentials, and models; users have no settings surface.
+- Only the developer configures the provider, deployments, and credentials; users have no settings surface.
 - Credentials are resolved in infrastructure and never reach domain or application code.
 - Preview is a separate origin served from a capability URL. Generated JavaScript is syntax-checked with
   `node --check` and never executed by the server.
@@ -109,8 +110,10 @@ team RBAC.
 
 ### Where other models are worth trying
 
-The model layer is a port, so providers change by developer configuration, never by end users. The Reviewer is
-the best first experiment: a wrong review is recoverable, while a wrong Coder output consumes an attempt.
+The model layer is a port, so a second provider would need an infrastructure adapter plus developer
+configuration; end users never choose. Azure deployment names can already be switched per role through
+environment settings. The Reviewer is the best first experiment: a wrong review is recoverable, while a wrong
+Coder output consumes an attempt.
 Planner and Coder are poor candidates for small models because multi-file coherence, long context, and strict
 structured output degrade first. See [providers and secrets](docs/architecture.md#43-providers-and-secrets).
 
