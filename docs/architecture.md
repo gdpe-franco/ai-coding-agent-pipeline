@@ -688,9 +688,10 @@ navigation and relative asset loading reliable without cookies or bearer headers
 
 Preview responses set `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`. The iframe uses
 `sandbox="allow-scripts allow-same-origin allow-forms allow-popups"` with no `allow-top-navigation`; the separate
-origin is essential because scripts and same-origin are both allowed. Preview files must use relative local asset
-paths. `preview_id` is stable until the project is deleted. Rotation, signed previews, and containerized
-execution of generated apps are deferred.
+origin is essential because scripts and same-origin are both allowed. `allow-modals` is omitted, so `alert`,
+`confirm`, and `prompt` calls are suppressed inside the preview. Preview files must use relative local asset paths.
+`preview_id` is stable until the project is deleted. Rotation, signed previews, and containerized execution of
+generated apps are deferred.
 
 ## 8. Data and storage
 

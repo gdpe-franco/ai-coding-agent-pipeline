@@ -702,17 +702,55 @@ def test_artifact_content_matches_checksum(client: TestClient, settings: Setting
 
 def test_preview_url_and_preview_route(client: TestClient, settings: Settings) -> None:
     token = register_and_login(client, "alice@example.com")
+    other_token = register_and_login(client, "bob@example.com")
     project = client.post(
         "/api/v1/projects", headers=auth_headers(token), json={"title": "P", "summary": ""}
     ).json()
+    preview_dir = settings.data_dir / "preview" / project["id"]
+    preview_dir.mkdir(parents=True)
+    (preview_dir / "index.html").write_text(
+        '<link rel="stylesheet" href="styles.css"><script src="app.js"></script>'
+        '<img src="logo.svg">',
+        encoding="utf-8",
+    )
+    (preview_dir / "styles.css").write_text("body { color: red; }", encoding="utf-8")
+    (preview_dir / "app.js").write_text("document.title = 'preview';", encoding="utf-8")
+    (preview_dir / "logo.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8"
+    )
 
     url = client.get(
         f"/api/v1/projects/{project['id']}/preview-url", headers=auth_headers(token)
     ).json()["url"]
     assert project["preview_id"] in url
+    assert project["preview_id"] != project["id"]
 
-    missing = client.get(f"/preview/{project['preview_id']}/index.html")
-    assert missing.status_code == 404
+    document = client.get(f"/preview/{project['preview_id']}/index.html")
+    assert document.status_code == 200
+    assert (
+        "styles.css" in document.text and "app.js" in document.text and "logo.svg" in document.text
+    )
+    assert document.headers["X-Robots-Tag"] == "noindex"
+    assert document.headers["Referrer-Policy"] == "no-referrer"
+    assert document.headers["Cache-Control"] == "no-store"
+    assert client.get(f"/preview/{project['preview_id']}/styles.css").text == "body { color: red; }"
+    assert (
+        client.get(f"/preview/{project['preview_id']}/app.js").text == "document.title = 'preview';"
+    )
+    assert client.get(f"/preview/{project['preview_id']}/logo.svg").status_code == 200
+    assert client.get(f"/preview/{project['preview_id']}/%2e%2e%2fsecret.txt").status_code == 404
+    assert (
+        client.get(
+            f"/api/v1/projects/{project['id']}", headers=auth_headers(other_token)
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/v1/projects/{project['id']}/files", headers=auth_headers(other_token)
+        ).status_code
+        == 404
+    )
     assert (
         client.get(
             f"/api/v1/projects/{project['id']}/preview-url", headers=auth_headers("bad")

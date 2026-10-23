@@ -108,7 +108,10 @@ class WebWorkspace(Workspace):
     async def read_preview(self, project_id: UUID, path: str) -> bytes:
         base = self._preview_dir(project_id)
         relative = path or "index.html"
-        validate_relative_path(relative)
+        try:
+            validate_relative_path(relative)
+        except ValueError as exc:
+            raise WorkspaceError(str(exc)) from exc
         target = (base / relative).resolve()
         if base not in target.parents and target != base:
             raise WorkspaceError("path escapes the preview directory")

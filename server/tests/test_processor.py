@@ -14,12 +14,14 @@ class EmptyWorkspace:
     def __init__(self) -> None:
         self.files: dict[str, str] = {}
         self.artifacts: dict[str, str] = {}
+        self.preview: dict[str, str] = {}
 
     async def read_all(self, project_id):
         return self.files
 
     async def publish(self, project_id, files, artifact_ids):
         self.files = dict(files)
+        self.preview = dict(files)
 
     async def write_artifact(self, artifact_id, path, content):
         self.artifacts[path] = content
@@ -128,7 +130,9 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         }
     ]
     checks = {"file_structure_ok": True, "js_syntax_ok": True, "issues": []}
+    previous_preview = {"approved.html": "<h1>last approved</h1>"}
     processor.workspace.files = {"index.html": "<h1>preserved</h1>"}
+    processor.workspace.preview = dict(previous_preview)
     await processor._finalize(
         run.id,
         {
@@ -166,6 +170,9 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
     assert processor.workspace.files == {"index.html": "<h1>preserved</h1>"}
     if expected_status == RunStatus.AWAITING_USER:
         assert processor.workspace.artifacts == {"index.html": "<h1>preserved</h1>"}
+        assert processor.workspace.preview == previous_preview
+    else:
+        assert processor.workspace.preview == processor.workspace.files
     assert conversation.selected_project_id == current_project.id
     assert conversation.active_feature_run_id == current_run.id
     assert conversation.context_version == 7
