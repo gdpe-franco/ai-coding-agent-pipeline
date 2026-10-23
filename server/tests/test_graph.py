@@ -231,17 +231,36 @@ async def test_escalate_is_handoff() -> None:
         resolver=[RESOLVER_NEW],
         planner=[planner_reply()],
         coder=[{"file_path": "index.html", "content": "<h1>ok</h1>"}],
-        reviewer=[{"verdict": "escalate", "summary": "ambiguous", "issues": []}],
+        reviewer=[
+            {
+                "verdict": "escalate",
+                "summary": "ambiguous",
+                "issues": [{"message": "Need a product choice", "file_path": "index.html"}],
+            }
+        ],
     )
     result = await graph.ainvoke(base_state(), {})
     assert result["approved"] is False
     assert result["handoff"] is True
     assert result["attempts_used"] == 1
+    assert result["feedback"]["issues"] == [
+        {"message": "Need a product choice", "file_path": "index.html"}
+    ]
+    assert [(item["file_path"], item["content"]) for item in result["code"]] == [
+        ("index.html", "<h1>ok</h1>")
+    ]
 
 
 async def test_three_rejections_stop_the_round() -> None:
     coder = [{"file_path": "index.html", "content": f"<h1>{i}</h1>"} for i in range(3)]
-    reviewer = [{"verdict": "reject", "summary": "no", "issues": []} for _ in range(3)]
+    reviewer = [
+        {
+            "verdict": "reject",
+            "summary": f"rejection {i}",
+            "issues": [{"message": f"issue {i}", "file_path": "index.html"}],
+        }
+        for i in range(3)
+    ]
     graph, _, _, _ = make_graph(
         resolver=[RESOLVER_NEW], planner=[planner_reply()], coder=coder, reviewer=reviewer
     )
@@ -249,6 +268,13 @@ async def test_three_rejections_stop_the_round() -> None:
     assert result["approved"] is False
     assert result["handoff"] is False
     assert result["attempts_used"] == 3
+    assert result["attempts_total"] == 3
+    assert result["round"] == 1
+    assert [(item["file_path"], item["content"]) for item in result["code"]] == [
+        ("index.html", "<h1>2</h1>")
+    ]
+    assert result["feedback"]["summary"] == "rejection 2"
+    assert result["feedback"]["issues"] == [{"message": "issue 2", "file_path": "index.html"}]
 
 
 @pytest.mark.parametrize(

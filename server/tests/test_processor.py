@@ -11,11 +11,18 @@ pytestmark = pytest.mark.usefixtures("require_database")
 
 
 class EmptyWorkspace:
+    def __init__(self) -> None:
+        self.files: dict[str, str] = {}
+        self.artifacts: dict[str, str] = {}
+
     async def read_all(self, project_id):
-        return {}
+        return self.files
 
     async def publish(self, project_id, files, artifact_ids):
-        pass
+        self.files = dict(files)
+
+    async def write_artifact(self, artifact_id, path, content):
+        self.artifacts[path] = content
 
 
 class EmptyMemory:
@@ -47,22 +54,44 @@ async def processor_context(session_factory, repo_factory, settings):
                 "approved": True,
                 "handoff": False,
                 "attempts_used": 1,
+                "attempts_total": 1,
                 "feedback": {"summary": "Looks good.", "issues": []},
             },
             RunStatus.COMPLETED,
-            "Approved. Generated 0 files. Looks good.",
+            "Approved. Generated 1 files. Looks good.",
             id="approved",
         ),
         pytest.param(
             {
                 "approved": False,
                 "handoff": True,
+                "attempts_used": 1,
+                "attempts_total": 1,
+                "feedback": {
+                    "verdict": "escalate",
+                    "summary": "The reviewer needs a product decision.",
+                    "issues": [{"message": "Choose a checkout flow", "file_path": "index.html"}],
+                },
+            },
+            RunStatus.AWAITING_USER,
+            "This run needs your guidance. The reviewer needs a product decision.",
+            id="escalation",
+        ),
+        pytest.param(
+            {
+                "approved": False,
+                "handoff": False,
                 "attempts_used": 3,
-                "feedback": {"summary": "The reviewer needs more detail.", "issues": []},
+                "attempts_total": 3,
+                "feedback": {
+                    "verdict": "reject",
+                    "summary": "The reviewer needs more detail.",
+                    "issues": [{"message": "Fix the heading", "file_path": "index.html"}],
+                },
             },
             RunStatus.AWAITING_USER,
             "This run needs your guidance. The reviewer needs more detail.",
-            id="handoff",
+            id="third-rejection",
         ),
     ],
 )
@@ -74,7 +103,13 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         repo = SqlAlchemyRepository(session)
         project = await repo.create_project(user.id, "Result project")
         run = await repo.create_run(user.id, "request", project.id)
-        await repo.update_run(run.id, status=RunStatus.RUNNING)
+        await repo.update_run(
+            run.id,
+            status=RunStatus.RUNNING,
+            attempts_used=result["attempts_used"],
+            attempts_total=result["attempts_total"],
+            round=2,
+        )
         current_project = await repo.create_project(user.id, "Currently selected project")
         current_run = await repo.create_run(user.id, "Current feature", current_project.id)
         await repo.update_run(current_run.id, status=RunStatus.COMPLETED)
@@ -83,14 +118,26 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
         conversation.active_feature_run_id = current_run.id
         conversation.context_version = 7
         await repo.commit()
+    plan = {"summary": "preserved plan", "steps": []}
+    code = [
+        {
+            "file_path": "index.html",
+            "content": "<h1>preserved</h1>",
+            "checksum": "a" * 64,
+            "file_type": "html",
+        }
+    ]
+    checks = {"file_structure_ok": True, "js_syntax_ok": True, "issues": []}
+    processor.workspace.files = {"index.html": "<h1>preserved</h1>"}
     await processor._finalize(
         run.id,
         {
             "project_id": str(project.id),
             **result,
-            "attempts_total": 3,
-            "code": [],
-            "checks": {},
+            "attempts_total": result["attempts_total"],
+            "plan": plan,
+            "code": code,
+            "checks": checks,
         },
     )
     await processor._fail(run.id, RuntimeError("late worker failure"))
@@ -109,6 +156,16 @@ async def test_finalize_outcome_is_saved_and_not_overwritten_by_late_failure(
     assert [turn.run_id for turn in turns] == [run.id, current_run.id, run.id]
     assert [turn.project_id for turn in turns] == [project.id, current_project.id, project.id]
     assert saved_run.status == expected_status
+    assert saved_run.plan == plan
+    assert saved_run.latest_code == code
+    assert saved_run.feedback == result["feedback"]
+    assert saved_run.checks == checks
+    assert saved_run.attempts_used == result["attempts_used"]
+    assert saved_run.attempts_total == result["attempts_total"]
+    assert saved_run.round == 2
+    assert processor.workspace.files == {"index.html": "<h1>preserved</h1>"}
+    if expected_status == RunStatus.AWAITING_USER:
+        assert processor.workspace.artifacts == {"index.html": "<h1>preserved</h1>"}
     assert conversation.selected_project_id == current_project.id
     assert conversation.active_feature_run_id == current_run.id
     assert conversation.context_version == 7

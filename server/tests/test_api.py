@@ -497,7 +497,15 @@ def test_run_events_are_ordered_and_trace_is_owner_scoped(client: TestClient) ->
 
 def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     token = register_and_login(client, "alice@example.com")
-    run = client.post("/api/v1/runs", headers=auth_headers(token), json={"message": "new"}).json()
+    headers = auth_headers(token)
+    project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Handoff project", "summary": ""}
+    ).json()
+    run = client.post(
+        "/api/v1/runs",
+        headers=headers,
+        json={"message": "new", "project_id": project["id"]},
+    ).json()
     run_id = run["run_id"]
 
     assert (
@@ -510,17 +518,22 @@ def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
         client.post(f"/api/v1/runs/{run_id}/close", headers=auth_headers(token)).status_code == 409
     )
 
+    plan = {"summary": "preserve this plan"}
+    code = [{"file_path": "index.html", "content": "<h1>preserved</h1>", "checksum": "abc"}]
+    feedback = {"verdict": "reject", "summary": "Needs guidance", "issues": [{"message": "Fix it"}]}
+    checks = {"file_structure_ok": True, "js_syntax_ok": True, "issues": []}
     with psycopg.connect(Settings().psycopg_url) as connection:
         connection.execute(
             "UPDATE runs SET status='awaiting_user', attempts_used=3, attempts_total=5, round=2"
+            ", plan=%s::jsonb, latest_code=%s::jsonb, feedback=%s::jsonb, checks=%s::jsonb"
             " WHERE id=%s",
-            (run_id,),
+            (json.dumps(plan), json.dumps(code), json.dumps(feedback), json.dumps(checks), run_id),
         )
         connection.commit()
 
     resumed = client.post(
         f"/api/v1/runs/{run_id}/resume",
-        headers=auth_headers(token),
+        headers=headers,
         json={"guidance": "make it bold"},
     )
     assert resumed.status_code == 200
@@ -529,26 +542,108 @@ def test_resume_and_close_require_awaiting_user(client: TestClient) -> None:
     assert body["round"] == 3
     assert body["attempts_used"] == 0
     assert body["attempts_total"] == 5
+    assert body["project_id"] == project["id"]
+    assert body["plan"] == plan
+    assert body["latest_code"] == code
+    assert body["feedback"] == feedback
+    assert body["checks"] == checks
     assert body["user_guidance"] == "make it bold"
-    turns = client.get("/api/v1/chat", headers=auth_headers(token)).json()["turns"]
+    turns = client.get("/api/v1/chat", headers=headers).json()["turns"]
     assert [turn["content"] for turn in turns] == ["new", "make it bold"]
     assert all(turn["run_id"] == run_id for turn in turns)
+    assert all(turn["project_id"] == project["id"] for turn in turns)
 
     with psycopg.connect(Settings().psycopg_url) as connection:
         connection.execute("UPDATE runs SET status='awaiting_user' WHERE id=%s", (run_id,))
         connection.commit()
-    closed = client.post(f"/api/v1/runs/{run_id}/close", headers=auth_headers(token))
+    closed = client.post(f"/api/v1/runs/{run_id}/close", headers=headers)
     assert closed.status_code == 200
     assert closed.json()["status"] == "failed"
-    turns = client.get("/api/v1/chat", headers=auth_headers(token)).json()["turns"]
+    assert closed.json()["project_id"] == project["id"]
+    assert closed.json()["plan"] == plan
+    assert closed.json()["latest_code"] == code
+    assert closed.json()["feedback"] == feedback
+    assert closed.json()["checks"] == checks
+    assert closed.json()["round"] == 3
+    assert closed.json()["attempts_used"] == 0
+    assert closed.json()["attempts_total"] == 5
+    turns = client.get("/api/v1/chat", headers=headers).json()["turns"]
     assert turns[-1]["role"] == "assistant"
     assert turns[-1]["run_id"] == run_id
     assert turns[0]["run_status"] == "failed"
     kinds = [
         event["kind"]
-        for event in client.get(f"/api/v1/runs/{run_id}/events", headers=auth_headers(token)).json()
+        for event in client.get(f"/api/v1/runs/{run_id}/events", headers=headers).json()
     ]
     assert "chat_reply" in kinds
+
+
+@pytest.mark.parametrize("guidance", ["", "   ", "\n\t"], ids=["empty", "spaces", "whitespace"])
+def test_resume_requires_nonblank_guidance(client: TestClient, guidance: str) -> None:
+    token = register_and_login(client, "alice@example.com")
+    run = client.post("/api/v1/runs", headers=auth_headers(token), json={"message": "new"}).json()
+
+    response = client.post(
+        f"/api/v1/runs/{run['run_id']}/resume",
+        headers=auth_headers(token),
+        json={"guidance": guidance},
+    )
+
+    assert response.status_code == 422
+
+
+def test_switching_context_does_not_resume_or_close_handoff(client: TestClient) -> None:
+    token = register_and_login(client, "alice@example.com")
+    headers = auth_headers(token)
+    handoff_project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Handoff", "summary": ""}
+    ).json()
+    other_project = client.post(
+        "/api/v1/projects", headers=headers, json={"title": "Other", "summary": ""}
+    ).json()
+    handoff = client.post(
+        "/api/v1/runs",
+        headers=headers,
+        json={"message": "unfinished", "project_id": handoff_project["id"]},
+    ).json()
+    with psycopg.connect(Settings().psycopg_url) as connection:
+        connection.execute(
+            "UPDATE conversations SET selected_project_id=%s, active_feature_run_id=%s, context_version=1"
+            " WHERE owner_id=(SELECT id FROM users WHERE email='alice@example.com')",
+            (handoff_project["id"], handoff["run_id"]),
+        )
+        connection.execute(
+            "UPDATE runs SET status='awaiting_user', round=2, attempts_used=3, attempts_total=6"
+            " WHERE id=%s",
+            (handoff["run_id"],),
+        )
+        connection.commit()
+
+    request = client.post(
+        "/api/v1/chat/messages",
+        headers=headers,
+        json={"message": "Work on the other project", "request_selection": True},
+    )
+    assert request.status_code == 202
+    pending = client.get("/api/v1/chat", headers=headers).json()["pending_selection"]
+    switched = client.post(
+        f"/api/v1/chat/messages/{request.json()['turn_id']}/selection",
+        headers=headers,
+        json={
+            "context_version": pending["context_version"],
+            "choice": "existing_project",
+            "feature_mode": "continue",
+            "project_id": other_project["id"],
+        },
+    )
+
+    assert switched.status_code == 202
+    unchanged = client.get(f"/api/v1/runs/{handoff['run_id']}", headers=headers).json()
+    assert unchanged["status"] == "awaiting_user"
+    assert unchanged["project_id"] == handoff_project["id"]
+    assert unchanged["round"] == 2
+    assert unchanged["attempts_used"] == 3
+    assert unchanged["attempts_total"] == 6
 
 
 def test_delete_terminal_run(client: TestClient) -> None:

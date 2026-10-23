@@ -56,7 +56,9 @@ class RunRead(BaseModel):
 
 
 class ResumeRequest(BaseModel):
-    guidance: str = Field(min_length=1, max_length=4000)
+    guidance: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
+    ]
 
 
 class EventRead(BaseModel):

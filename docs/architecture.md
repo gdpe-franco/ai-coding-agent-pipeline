@@ -619,7 +619,7 @@ unprefixed. Requests and responses are JSON validated by Pydantic v2; errors use
 - A non-owned selection returns `404`. A stale context version or cancelled/invalid request transition returns
   `409`; the server never falls back to the current project after a rejected choice. Cancel leaves the previous
   context unchanged. A retry after successful selection returns the already linked run rather than enqueueing again.
-- `resume` accepts `{guidance: "..."}` and is valid only for `awaiting_user`; return `409` on a status mismatch.
+- `resume` accepts nonblank `{guidance: "..."}` and is valid only for `awaiting_user`; return `409` on a status mismatch.
   It resets the Coder budget and reruns the full flow; `attempts_total` is preserved. Guidance is persisted in
   the same user chat against that run; changing the chat's current context cannot change the resumed project.
 - `close` is valid only for `awaiting_user`; it marks `failed` and preserves history.
