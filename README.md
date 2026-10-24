@@ -1,173 +1,291 @@
 # AI Multi-Agent Coding Platform
 
-Describe a small web app in plain language. The platform plans the files, generates them, reviews the result,
-and returns a preview or a handoff with the open issues.
+Esta plataforma permite crear pequeñas aplicaciones web a partir de una descripción. Desde un chat, el usuario
+plantea lo que necesita y pide cambios sobre el mismo proyecto. Tres agentes se encargan de planear los archivos,
+generar el código y revisar el resultado.
 
-> **Status:** MVP in progress. Private accounts, a persistent chat per project, run history, and an Azure live run
-> are implemented. Broader provider evaluation
-> remains follow-on work.
+La demo trabaja con aplicaciones estáticas en HTML, CSS y JavaScript e incluye cuentas de usuario,
+conversaciones persistentes e historial de ejecuciones.
 
-## How it works
+[Demo pública](https://version-afar-augmented.ngrok-free.dev) ·
+[Diseño técnico — English](docs/architecture.md) ·
+[Swagger local](http://localhost:8000/docs)
 
-```puml
-@startuml
-!pragma layout smetana
-skinparam backgroundColor white
-skinparam shadowing false
-actor User
-node "App\nSPA + FastAPI :8000" as app
-node "Worker" as worker
-database "PostgreSQL 17" as db
-folder "Workspace volume\ndata/projects, artifacts, preview, archive" as files
-node "Preview origin\npreview.localhost" as preview
+## Funcionalidades principales
 
-User --> app : REST /api/v1
-User --> preview : capability URL
-app --> db : enqueue run
-app --> files : read / serve
-worker --> db : claim + checkpoints
-worker --> files : atomic writes + snapshots
-preview --> files : copied static files
-@enduml
+- Solicitudes en lenguaje natural y conversaciones que conservan el contexto de cada proyecto.
+- Plan de trabajo, generación de archivos y revisión con observaciones para corregir el código.
+- Hasta tres generaciones del Coder por ejecución, incluida la primera; el límite es configurable.
+- Historial con estados, validaciones, archivos guardados y consumo de tokens cuando Azure lo informa.
+- Explorador de código y vista previa de la última versión aprobada.
+- Solicitud de orientación cuando los agentes agotan sus intentos o necesitan una aclaración.
+- Interfaz adaptable a teléfonos y escritorio, con una barra lateral para cambiar de chat.
+
+## ¿Cómo funciona?
+
+```mermaid
+flowchart LR
+    usuario[Usuario] --> chat["Chat web: ticket o cambio"]
+    chat --> planner[Planner]
+    planner -->|Plan de archivos| coder[Coder]
+    coder -->|Código y validaciones| reviewer[Reviewer]
+    reviewer -->|Rechazo y observaciones, si quedan intentos| coder
+    reviewer -->|Aprobación, escalación o límite alcanzado| resultado[Resultado]
+    resultado --> chat
+    classDef user fill:#2a1a18,stroke:#d9776e,color:#f0f0ee,stroke-width:2px
+    classDef agent fill:#171716,stroke:#6f3d38,color:#f0f0ee
+    classDef outcome fill:#152328,stroke:#35515a,color:#f0f0ee
+    class usuario user
+    class chat,planner,coder,reviewer agent
+    class resultado outcome
 ```
 
-After login, the user opens a project chat from the sidebar or starts a new chat. The first message atomically
-creates its project, chat, message, and run. Each chat stays bound to one project; switching chats is the only
-way to change project context. The worker executes each run through the LangGraph workflow (planner → coder →
-reviewer) and records progress in the run's event history.
+1. Al enviar el primer mensaje en **Nuevo chat**, se crea un proyecto. Las siguientes solicitudes de ese chat
+   trabajan sobre sus archivos.
+2. El **Planner** propone entre uno y ocho archivos. El **Coder** escribe su contenido completo a partir del plan
+   y de los archivos que ya existen.
+3. Se revisa que los archivos estén presentes y que el JavaScript externo tenga sintaxis válida. Después, el
+   **Reviewer** compara el código con la solicitud y señala los problemas que encuentra.
+4. Si aprueba el resultado, se publica la vista previa. Si pide correcciones, el Coder recibe sus observaciones
+   y vuelve a intentarlo. Al llegar al límite, se conserva el trabajo y se pide orientación al usuario.
 
-The [technical design document](docs/architecture.md) is the source of truth for the stack, contracts, security
-rules, schema, trade-offs, and the presentation guide. The PRD, in the ignored `tasks/` directory, owns user
-stories and acceptance criteria.
+Cada solicitud se registra como un **run**. Si necesita una aclaración, el usuario puede continuar ese mismo run
+en una nueva **ejecución**, que vuelve a pasar por los tres agentes.
 
-## Run the local stack
+## Arquitectura general
 
-1. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and use `openssl rand -hex 32` to generate `SECRET_KEY`.
-   Authentication and chat work without model credentials; configure Azure OpenAI and its deployments before
-   using coding runs. See the [environment table](docs/architecture.md#93-environment-variables).
-2. Build and start:
+```mermaid
+flowchart LR
+    usuario[Usuario] --> appOrigin["Origen de aplicación<br/>ngrok en la demo"]
+    appOrigin --> ui["Frontend Vue<br/>chat e inspección"]
+    ui -->|Solicitudes y polling| api["API FastAPI<br/>SPA compilada y endpoints"]
+    usuario -->|Preview aprobado| previewOrigin["Origen de preview<br/>Cloudflare Quick Tunnel"]
+    previewOrigin -->|Rutas de preview| api
+    api -->|Cuentas, mensajes, cola y eventos| db[(PostgreSQL)]
+    api -->|Lectura y preview| files["Workspace persistente"]
+    worker["Worker separado<br/>LangGraph"] -->|Claim, estado y checkpoints| db
+    worker -->|Generación y publicación| files
+    worker -->|Llamadas por rol| llm["Azure OpenAI"]
+    classDef user fill:#2a1a18,stroke:#d9776e,color:#f0f0ee,stroke-width:2px
+    classDef service fill:#171716,stroke:#6f3d38,color:#f0f0ee
+    classDef storage fill:#152328,stroke:#35515a,color:#f0f0ee
+    class usuario user
+    class appOrigin,previewOrigin,ui,api,worker,llm service
+    class db,files storage
+```
 
-   ```bash
-   docker compose up -d --build
-   docker compose ps
-   curl -fsS http://localhost:8000/health
-   ```
+La API recibe las solicitudes y permite consultar su avance. El worker ejecuta los agentes en segundo plano,
+por lo que el navegador puede seguir consultando el estado durante una generación larga. Ambos procesos usan
+la misma imagen de Docker y comparten el almacenamiento.
 
-   Compose waits for PostgreSQL, runs the one-shot migration service, then starts the app and worker. `/health`
-   reports database, filesystem, and worker-heartbeat status; it returns `503` until all three are ready. The
-   worker has no HTTP server, so its liveness is reported by the app.
+El backend también sirve las vistas previas, con un hostname distinto para separar el código generado de la
+aplicación donde inicia sesión el usuario. El [diseño técnico](docs/architecture.md) explica los contratos,
+la persistencia y los límites de esta separación.
 
-3. Open:
+## Tecnologías principales
 
-   - App `http://localhost:8000`
-   - API `http://localhost:8000/api/v1`
-   - Preview `http://preview.localhost:8000`
+| Tecnología | Responsabilidad y motivo de uso |
+|---|---|
+| Vue 3, TypeScript, Pinia, Tailwind y Vite | Interfaz del chat, navegación y consulta de resultados. Vite compila la aplicación para servirla desde el backend. |
+| FastAPI y Pydantic v2 | API, validación de datos y documentación OpenAPI generada a partir de las rutas. |
+| LangGraph | Coordina el orden de los agentes, las revisiones y los checkpoints de cada ejecución. |
+| PostgreSQL 17, SQLAlchemy y Alembic | Almacenan cuentas, conversaciones y ejecuciones; PostgreSQL también resuelve la cola y los límites de peticiones de la demo. |
+| Azure OpenAI y SDK OpenAI | Proveedor actual de los agentes, con respuestas estructuradas y deployments configurables por rol. |
+| Python 3.14 y Node.js | Python ejecuta la API y el worker. Node comprueba la sintaxis del JavaScript generado mediante `node --check`. |
+| Docker Compose, ngrok y cloudflared | Levantan los servicios y permiten compartir la demo desde una máquina local, con direcciones separadas para la app y sus vistas previas. |
 
-The app is bound to host loopback on port `8000`; PostgreSQL is bound to host loopback on `5432`. Neither is
-published to the LAN by default. `docker compose down` stops the stack but preserves volumes. Do not use
-`docker compose down -v` for routine shutdown; it removes persistent database and workspace data.
+## Instalación y ejecución local
 
-## Public assessment tunnel
+### Requisitos y configuración
 
-The app and generated previews must use separate hostnames. The server enforces this separation; requests for
-preview files on the app hostname, or app/API routes on the preview hostname, return `404`.
+Para ejecutar el proyecto con Docker necesitas Git, Docker Engine y Docker Compose v2. La imagen incluye Python
+y Node. La generación de código requiere una cuenta de Azure OpenAI con deployments compatibles con JSON Schema.
 
-Copy `.env.example` to ignored `.env` and set `APP_ENV=production`, a generated strong `SECRET_KEY`, and `PUBLIC_URL`
-to the assigned app URL. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite development remains allowed; the
-built app uses same-origin requests. Committed `ngrok.yml` defines the named endpoints the agent starts; its `app`
-endpoint pins the assigned domain and must match `PUBLIC_URL`. `demo-up.sh` refreshes `PREVIEW_HOST` in `.env`.
+Desde la raíz, **solo si aún no existe `.env`**:
 
-Copy `.env.tunnel.example` to ignored `.env.tunnel` and put the ngrok agent token there. The token is supplied
-only to ngrok connector containers, not the app or worker. Extra endpoints go in `ngrok.yml`; the free plan can
-only use one dev domain, so previews use a Cloudflare Quick Tunnel.
+```bash
+cp .env.example .env
+openssl rand -hex 32
+```
 
-Start or restart everything with one command:
+Guarda el secreto generado en `SECRET_KEY`, cambia `POSTGRES_PASSWORD` y ajusta `DATABASE_URL` para tus procesos
+locales. `.env` reúne la configuración de desarrollo y de la demo; si ya lo tienes, conserva sus credenciales
+y modifica solo los valores necesarios. Los archivos de ejemplo deben quedarse sin credenciales reales.
+
+| Variable | Qué configurar |
+|---|---|
+| `APP_ENV` | `development` en local; `production` para la demo pública. |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Credenciales de PostgreSQL. Compose arma la conexión interna con el hostname `db`. |
+| `DATABASE_URL` | Conexión para los procesos que ejecutas fuera de Docker. |
+| `SECRET_KEY` | Secreto para firmar los JWT. En producción debe tener al menos 32 caracteres y un valor distinto al del ejemplo. |
+| `PUBLIC_URL`, `FRONTEND_ORIGIN`, `PREVIEW_HOST` | En local: `http://localhost:8000`, `http://localhost:5173` y `http://preview.localhost:8000`. La app y las vistas previas requieren hostnames distintos. |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Credencial y endpoint Azure terminado en `/openai/v1/`. |
+| `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Nombres reales de deployment; pueden coincidir o ser distintos. |
+| `MAX_RUNS_PER_PROJECT`, `MAX_CODER_GENERATIONS` | Por defecto, `10` runs guardados por proyecto y `3` generaciones totales por ejecución. |
+
+Puedes iniciar sesión y consultar la aplicación antes de configurar Azure. Si intentas generar código, el run
+indicará qué variable falta. Consulta la [referencia de configuración](docs/architecture.md#93-environment-variables)
+para el resto de las opciones.
+
+### Arranque con Docker
+
+```bash
+docker compose up -d --build
+docker compose ps
+curl -fsS http://localhost:8000/health
+```
+
+Compose inicia PostgreSQL, aplica las migraciones con el servicio `migrate` y después arranca la app y el worker.
+`/health` devuelve `200` cuando puede acceder a la base, escribir en el workspace y detectar un heartbeat reciente
+del worker. Durante el arranque puede responder `503`.
+
+- Aplicación y API: <http://localhost:8000> y rutas bajo `/api/v1`.
+- Swagger/OpenAPI: <http://localhost:8000/docs> y <http://localhost:8000/openapi.json>.
+- Vista previa: el enlace de cada proyecto tiene la forma `http://preview.localhost:8000/preview/{preview_id}/`.
+- PostgreSQL: `127.0.0.1:5432`. La API se publica solo en `127.0.0.1:8000`.
+
+```bash
+docker compose logs -f --tail=200 app worker
+docker compose down
+```
+
+`down` conserva los volúmenes. **`docker compose down -v` elimina la base y los archivos persistentes.** Las
+credenciales `POSTGRES_*` inicializan un volumen nuevo; cambiarlas no rota automáticamente las de uno existente.
+
+### Desarrollo y pruebas
+
+Para trabajar fuera de Docker, instala Python 3.14 y Node.js/npm. Después, prepara el entorno desde `server/`:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+Con `DATABASE_URL` apuntando a tu base de desarrollo, aplica las migraciones con `alembic upgrade head`.
+Levanta la API con `uvicorn app.main:create_app --factory --reload` y el worker con `python -m app.worker`, cada
+uno en su terminal. Desde `client/`, `npm ci && npm run dev` abre Vite en <http://localhost:5173> y redirige `/api`
+a la API local.
+
+**Usa una base exclusiva para las pruebas:** los fixtures de pytest vacían las tablas. Con PostgreSQL disponible,
+puedes crear `app_test` desde la raíz:
+
+```bash
+docker compose exec db sh -c 'createdb -U "$POSTGRES_USER" app_test'
+```
+
+La base se crea una sola vez. Si ya existe, continúa desde `server/` con el entorno virtual activo:
+
+```bash
+export DATABASE_URL='postgresql+asyncpg://<usuario>:<password>@127.0.0.1:5432/app_test'
+alembic upgrade head
+ruff check .
+ruff format --check .
+pytest
+python -m evals.runner
+```
+
+Sustituye los valores entre `<...>` y codifica los caracteres especiales de la contraseña para usarlos en una URL.
+Las pruebas usan respuestas de modelo simuladas. Para completar la validación, PostgreSQL debe estar disponible.
+
+Desde la raíz, con la app de Compose activa:
+
+```bash
+docker compose --profile e2e run --rm browser
+```
+
+Playwright recorre el chat, las continuaciones y las pantallas de detalle en móvil y escritorio con una API simulada.
+Para evaluar la calidad de las aplicaciones generadas hacen falta tickets reales y pruebas de comportamiento.
+Para comprobar la compilación del frontend, ejecuta `npm run build` desde `client/`.
+
+## Demostración pública
+
+La aplicación está disponible en <https://version-afar-augmented.ngrok-free.dev> mientras la máquina que la aloja
+permanezca encendida y conectada.
+
+La demo usa ngrok para la app y Cloudflare Quick Tunnel para las vistas previas. El dominio de ngrok está en
+[ngrok.yml](ngrok.yml) y debe coincidir con `PUBLIC_URL`.
+
+1. Ajusta `.env`: `APP_ENV=production`, `PUBLIC_URL` al dominio configurado y un `SECRET_KEY` fuerte. Mantén
+   `FRONTEND_ORIGIN=http://localhost:5173` si también usarás Vite. `PREVIEW_HOST` debe existir y usar otro hostname;
+   el valor local del ejemplo sirve para el arranque inicial.
+2. Copia `.env.tunnel.example` a `.env.tunnel` si aún no existe y agrega `NGROK_AUTHTOKEN`. Solo ngrok recibe ese
+   archivo; app y worker reciben `.env`.
+3. Ejecuta:
 
 ```bash
 ./demo-up.sh
 ```
 
-It brings up the database, migrations, app, worker, the ngrok app endpoint, and the preview tunnel, then syncs
-`PREVIEW_HOST` with the current Quick Tunnel address and prints both URLs. Use it after a reboot or
-`docker compose down`. The Quick Tunnel address changes when that tunnel restarts, which is why the script
-updates it for you.
+El script inicia ambos conectores y la aplicación, lee el hostname del Quick Tunnel, actualiza `PREVIEW_HOST` en
+`.env` y recrea app/worker si cambió. Úsalo después de reiniciar la máquina o recrear el túnel. Un reinicio aislado
+de cloudflared puede dejar el preview apuntando al hostname anterior hasta volver a ejecutar el script.
 
-Application request/run/agent logs and worker logs are JSON lines; Gunicorn/Uvicorn startup messages retain their
-standard format. Docker stores all container output with the rotating `json-file` driver. Follow app and worker
-logs with `docker compose logs -f --tail=200 app worker`. Run-event details include aggregate model token usage
-when the provider returns it; Coder usage is combined across files for each generation.
+## Decisiones de diseño
 
-Keep the desktop powered, awake, and online while reviewers need access. A locked session and blank display are
-fine. Stop the tunnel profiles when the review is over. Never publish PostgreSQL or share `.env` or `.env.tunnel`
-contents.
+| Problema | Decisión y beneficio | Compromiso |
+|---|---|---|
+| Organizar la generación y su revisión | Cada agente tiene una tarea y una salida definida, que el usuario puede consultar. | Aumentan las llamadas al modelo y pueden persistir errores compartidos entre roles. |
+| Controlar las correcciones automáticas | Se limita el número de generaciones y se pide orientación al agotarlas. | Algunos problemas requieren otra ejecución con ayuda del usuario. |
+| Atender solicitudes durante una generación larga | La API registra y consulta el trabajo; el worker lo ejecuta. | Hay que mantener el polling, los heartbeats y la recuperación de estado. |
+| Mantener una infraestructura sencilla | PostgreSQL reúne datos, cola e historial para la carga de la demo. | API y worker comparten recursos de base de datos; ampliar la concurrencia requiere medir esa carga. |
+| Conservar el contexto | Cada chat pertenece a un proyecto y reúne sus solicitudes, archivos y memoria. | La asociación entre chat y proyecto es fija. |
+| Retomar trabajo pendiente | `awaiting_user` guarda los problemas de la revisión y permite continuar el mismo run con orientación. | El chat queda ocupado hasta continuar o cerrar ese run. |
+| Separar el código generado de la sesión del usuario | La vista previa se sirve en otro origen y se abre mediante un enlace compartible. | Cualquier persona con el enlace puede verla. |
+| Investigar fallos y consumo | Los eventos, logs y tokens permiten seguir cada ejecución. | La retención de logs es limitada y el consumo observado puede quedar incompleto en un fallo. |
 
-For manual local development, switch the same `.env` back to `APP_ENV=development`,
-`PUBLIC_URL=http://localhost:8000`, and `PREVIEW_HOST=http://preview.localhost:8000`. Start only PostgreSQL with
-`docker compose up -d db` and point the host-side `DATABASE_URL` at the published database port (`localhost:5432`
-by default). Then run from `server/`:
+## ¿Qué ocurre cuando el Coder y el Reviewer no llegan a un acuerdo?
 
-```bash
-pip install -e '.[dev]'
-alembic upgrade head
-uvicorn app.main:create_app --factory --reload
-python -m app.worker
-ruff check . && ruff format --check . && pytest
-python -m evals.runner
-```
+El Reviewer puede aprobar el resultado, pedir correcciones o escalar el caso para solicitar orientación.
+Cuando pide correcciones, el Coder recibe sus observaciones y vuelve a generar los archivos sobre el mismo plan.
 
-Run the deterministic headless chat journey against the Compose app with
-`docker compose --profile e2e run --rm browser`; it uses mocked API responses and does not call a model.
+El límite se configura con `MAX_CODER_GENERATIONS`. Su valor inicial, `3`, permite una generación y hasta dos
+revisiones. El mínimo es `1`. Cada generación abarca todos los archivos del plan y puede requerir varias llamadas
+al modelo; si el Reviewer aprueba antes, la ejecución termina ahí.
 
-Run the SPA with `npm ci && npm run dev` from `client/`; Vite proxies `/api` to port 8000. See the
-[serving contract](docs/architecture.md#92-serving-and-topology).
+Al agotar los intentos o escalar el caso, el run queda en `awaiting_user` y conserva los archivos y las observaciones.
+La última vista previa aprobada sigue disponible. Desde los detalles, el usuario puede enviar una aclaración para
+iniciar otra ejecución del mismo run, con un nuevo `execution_id` y sus intentos disponibles, o cerrarlo como
+`failed`. Los errores técnicos también se registran con ese estado y una explicación para el usuario.
 
-## Security
+Este límite ayuda a controlar el tiempo y el consumo de cada ejecución. La revisión automática comprueba el plan,
+los archivos y la sintaxis; la corrección funcional de la aplicación todavía requiere pruebas de comportamiento.
+La demo tampoco aplica un presupuesto monetario o de tokens.
 
-- JWT authentication; chats, projects, runs, files, and run events are owner-scoped.
-- Per-IP and per-user rate limits; over-limit requests return `429` with `Retry-After`.
-- Only the developer configures the provider, deployments, and credentials; users have no settings surface.
-- Credentials are resolved in infrastructure and never reach domain or application code.
-- Preview is a separate origin served from a capability URL. Generated JavaScript is syntax-checked with
-  `node --check` and never executed by the server.
+## ¿Qué mejoraría con más tiempo?
 
-See [API design](docs/architecture.md#6-api-design) and the
-[security model](docs/architecture.md#7-security-and-abuse-prevention).
+**A. Trabajar sobre repositorios existentes.** Ampliaría `Workspace` para consultar una base de código, preparar
+cambios, mostrar diffs y abrir pull requests. Eso requiere seleccionar bien el contexto, limitar los permisos del
+repositorio y ejecutar las validaciones en un entorno aislado.
 
-## Repository layout
+**B. Probar más proveedores y modelos.** Cada agente ya puede usar un deployment distinto de Azure. Agregaría
+otros proveedores y compararía calidad, latencia, fiabilidad y costo con tickets reales, incluyendo la precisión
+del Reviewer al aprobar o rechazar una solución.
 
-- `client/` — Vue 3 / TypeScript SPA built with Vite and Tailwind.
-- `server/` — FastAPI / LangGraph backend, worker, Alembic migration, tests, and evaluation harness.
-- `shared/` — reserved for shared contracts.
-- `docs/` — architecture.
-- `tasks/` — ignored working briefs and the PRD.
-- `Dockerfile`, `docker-compose.yml`, `.env.example` — local stack.
+**C. Versionar las instrucciones de los agentes.** Guardaría la versión de los prompts usada en cada ejecución
+para poder reproducir y comparar resultados. Si fuera necesario cambiarlos durante la operación, una configuración
+controlada en PostgreSQL permitiría hacerlo con historial de cambios.
 
-## Design notes
+**D. Ampliar la validación.** Empezaría por pruebas funcionales en navegador y casos de regresión con tickets
+conocidos, dentro de un entorno aislado y con límites de recursos. Una capacidad de testing dedicada podría ayudar
+a preparar y ejecutar esas pruebas.
 
-### What I would change with more time
+**E. Seguimiento de la operación.** A partir de los eventos, logs y tokens actuales, agregaría métricas de
+latencia, consumo y fallos. OpenTelemetry, Prometheus/Grafana o New Relic serían opciones según el volumen y las
+necesidades de diagnóstico.
 
-Add a dedicated tester agent, so a plausible review is not treated as proof the app works, and grow the
-evaluation dataset from real requests. Move generated-app execution from the static preview page to isolated
-containers or Git-backed workspaces, and move the worker to a durable external queue with spend limits and team RBAC.
+**F. Desplegar y escalar los servicios por separado.** Separaría los despliegues de frontend, API y workers, con
+almacenamiento compartido y una recuperación de tareas más sólida. Mantendría el monorepo mientras facilite el
+trabajo del equipo; dividirlo tendría sentido si cambian las responsabilidades o los ciclos de publicación.
 
-### Where other models are worth trying
+## Documentación adicional
 
-The model layer is a port, so a second provider would need an infrastructure adapter plus developer
-configuration; end users never choose. Azure deployment names can already be switched per role through
-environment settings. The Reviewer is the best first experiment: a wrong review is recoverable, while a wrong
-Coder output consumes one of the bounded generations.
-Planner and Coder are poor candidates for small models because multi-file coherence, long context, and strict
-structured output degrade first. See [providers and secrets](docs/architecture.md#43-providers-and-secrets).
+- [Diseño técnico en inglés](docs/architecture.md): contratos, datos, seguridad, límites y puntos de extensión.
+- [Swagger local](http://localhost:8000/docs), [ReDoc local](http://localhost:8000/redoc) y
+  [OpenAPI JSON](http://localhost:8000/openapi.json): requieren la API activa en modo local.
+- [Pruebas backend](server/tests/), [evals deterministas](server/evals/runner.py) y
+  [journey de navegador](client/e2e/chat.spec.ts).
+- [Configuración de ejemplo](.env.example), [Compose](docker-compose.yml) y [arranque de demo](demo-up.sh).
 
-### How Coder and Reviewer disagreement is handled
-
-The workflow is bounded to three Coder generations per execution and runs without human input. An unresolved
-disagreement is never shown as success: the run stops in `awaiting_user` with the latest files, open issues, and
-event history. Guidance continues the same run in a new execution. See the
-[state contract](docs/architecture.md#52-state-contract).
-
-## Docs
-
-- [Technical design document](docs/architecture.md) — contracts, diagrams, schema, decisions and trade-offs,
-  verification, and the presentation guide, including the
-  [adapter recipe](docs/architecture.md#44-adding-an-adapter).
+La revisión se basó en el código y las pruebas disponibles. Queda pendiente revisar el PDF original y las reglas
+del ejemplo de cupones. El PRD de `tasks/` es un borrador local, excluido de Git.
