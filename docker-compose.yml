@@ -68,22 +68,13 @@ services:
     image: ngrok/ngrok@sha256:ff3b5c3674432d14a786349908b7bdf28ee56c25662637afcbe7180d471993ef
     profiles: [ngrok]
     restart: unless-stopped
-    command: ["http", "app:8000", "--url=${NGROK_APP_URL:-}", "--log=stdout"]
+    environment:
+      NGROK_CONFIG: /etc/ngrok/ngrok.yml
     env_file:
       - path: .env.tunnel
         required: false
-    depends_on:
-      app:
-        condition: service_healthy
-
-  ngrok-preview:
-    image: ngrok/ngrok@sha256:ff3b5c3674432d14a786349908b7bdf28ee56c25662637afcbe7180d471993ef
-    profiles: [ngrok-preview]
-    restart: unless-stopped
-    command: ["http", "app:8000", "--url=${NGROK_PREVIEW_URL:-}", "--log=stdout"]
-    env_file:
-      - path: .env.tunnel
-        required: false
+    volumes:
+      - ./ngrok.yml:/etc/ngrok/ngrok.yml:ro
     depends_on:
       app:
         condition: service_healthy
@@ -91,6 +82,7 @@ services:
   cloudflared-preview:
     image: cloudflare/cloudflared@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
     profiles: [cloudflare-preview]
+    restart: unless-stopped
     command: ["tunnel", "--no-autoupdate", "--url", "http://app:8000"]
     depends_on:
       app:

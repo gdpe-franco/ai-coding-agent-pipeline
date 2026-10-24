@@ -30,7 +30,7 @@ python -m evals.runner
 
 - Run backend checks from `server/`; `server/pyproject.toml` is the sole config (Python 3.14, line length 100, `asyncio_mode=auto`). `packages = []` installs dependencies only; the working directory makes `app` importable.
 - Ruff, pytest, and evals are the verification gate; no CI or pre-commit hooks exist. Skipped PostgreSQL tests do not satisfy it. Deterministic tests never call live models.
-- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, one-shot `migrate`, `app`, and `worker`, with a shared `appdata` workspace volume; migrations run before app/worker startup. Tunnel connectors are optional profiles. Headless chat journey: `docker compose --profile e2e run --rm browser`.
+- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, one-shot `migrate`, `app`, and `worker`, with a shared `appdata` workspace volume; migrations run before app/worker startup. Tunnel connectors are optional profiles. Headless chat journey: `docker compose --profile e2e run --rm browser`. Public assessment: `./demo-up.sh` starts app, ngrok, and the preview tunnel, and syncs the preview URL.
 
 ## Code and tests
 

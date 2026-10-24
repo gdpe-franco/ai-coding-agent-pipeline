@@ -806,10 +806,10 @@ and Coder read through the Workspace port; the MVP does not include a manual cod
 ### 9.1 Assessment path
 
 Run Docker locally and expose the app and preview hostnames through separate HTTPS tunnel endpoints. For the
-assessment, ngrok supplies a stable app hostname; use a second ngrok endpoint if the account allows it or a
-Cloudflare Quick Tunnel for previews. Quick Tunnel preview URLs change when restarted, requiring `PREVIEW_HOST`
-to be updated. The local machine supplies persistent disk and Node subprocesses without cold starts, so it must
-remain awake and online. Ephemeral hosting requires durable external storage before deployment.
+assessment, ngrok supplies a stable app hostname defined in committed `ngrok.yml`; use a Cloudflare Quick Tunnel
+for previews. Quick Tunnel preview URLs change when restarted, so `demo-up.sh` syncs `PREVIEW_HOST` after starting
+the stack. The local machine supplies persistent disk and Node subprocesses without cold starts, so it must remain
+awake and online. Ephemeral hosting requires durable external storage before deployment.
 
 ### 9.2 Serving and topology
 
@@ -834,8 +834,7 @@ remain awake and online. Ephemeral hosting requires durable external storage bef
 | `PUBLIC_URL` | Stable external app URL, e.g. `http://localhost:8000`. |
 | `FRONTEND_ORIGIN` | Allowed SPA origin, e.g. `http://localhost:5173` in Vite development. |
 | `PREVIEW_HOST` | Preview origin, e.g. `http://preview.localhost:8000`. |
-| `NGROK_APP_URL`, `NGROK_PREVIEW_URL` | Optional full HTTPS endpoint URLs used by the Compose tunnel profiles. |
-| `NGROK_AUTHTOKEN` | ngrok agent credential in ignored `.env.tunnel`, provided only to ngrok connector containers. |
+| `NGROK_AUTHTOKEN` | ngrok agent credential in ignored `.env.tunnel`, provided only to ngrok connector containers. Endpoint names and URLs live in committed `ngrok.yml`. |
 | `MAX_RUNS_PER_PROJECT` | Hard run cap `100`. The workflow has an internal maximum of three Coder generations per execution. |
 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
 | `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names. |
@@ -860,8 +859,8 @@ target.
 - `app`: gunicorn + uvicorn workers, serves the frontend and API, enqueues runs.
 - `worker`: same image, `python -m app.worker`, claims and executes runs.
 - `migrate`: one-shot `alembic upgrade head`, after PostgreSQL is healthy and before app/worker startup.
-- Optional `ngrok`, `ngrok-preview`, and `cloudflared-preview` profiles expose only the app listener. ngrok gets
-  its token from ignored `.env.tunnel`; Quick Tunnel needs no credential.
+- Optional `ngrok` and `cloudflared-preview` profiles expose only the app listener. `ngrok` runs `start --all`
+  over committed `ngrok.yml` and gets its token from ignored `.env.tunnel`; Quick Tunnel needs no credential.
 - Runtime Node is required for `node --check`. Do not create application tables with `create_all`.
 - Long-running services use `restart: unless-stopped`; `docker compose down` preserves named volumes.
   `docker compose down -v` deletes local database and workspace data.

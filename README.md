@@ -72,42 +72,30 @@ published to the LAN by default. `docker compose down` stops the stack but prese
 The app and generated previews must use separate hostnames. The server enforces this separation; requests for
 preview files on the app hostname, or app/API routes on the preview hostname, return `404`.
 
-Keep local settings in `.env`. For a public review, copy `.env.demo.example` to ignored `.env.demo` and set the
-assigned app URL in both `PUBLIC_URL` and `NGROK_APP_URL`. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite
-development remains allowed; the built app uses same-origin requests. `.env.demo` overrides only the public
-origins for app/worker containers.
+Keep local settings in `.env`. For a public review, copy `.env.demo.example` to ignored `.env.demo` and set
+`PUBLIC_URL` to the assigned app URL. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite development remains
+allowed; the built app uses same-origin requests. `.env.demo` overrides only the public origins for app/worker
+containers. Committed `ngrok.yml` defines the named endpoints the agent starts; its `app` endpoint pins the
+assigned domain and must match `PUBLIC_URL`.
 
 Copy `.env.tunnel.example` to ignored `.env.tunnel` and put the ngrok agent token there. The token is supplied
-only to ngrok connector containers, not the app or worker. Start the stable app URL and stack with:
+only to ngrok connector containers, not the app or worker. Extra endpoints go in `ngrok.yml`; the free plan can
+only use one dev domain, so previews use a Cloudflare Quick Tunnel.
+
+Start or restart everything with one command:
 
 ```bash
-docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok up -d --build
+./demo-up.sh
 ```
 
-If the ngrok account provides a second endpoint, set distinct `NGROK_PREVIEW_URL` and `PREVIEW_HOST` values in
-`.env.demo`, then start both ngrok connectors:
+It brings up the database, migrations, app, worker, the ngrok app endpoint, and the preview tunnel, then syncs
+`PREVIEW_HOST` with the current Quick Tunnel address and prints both URLs. Use it after a reboot or
+`docker compose down`. The Quick Tunnel address changes when that tunnel restarts, which is why the script
+updates it for you.
 
-```bash
-docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile ngrok-preview up -d
-```
-
-Otherwise start a Cloudflare Quick Tunnel for preview only:
-
-```bash
-docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile cloudflare-preview up -d cloudflared-preview
-docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile cloudflare-preview logs -f cloudflared-preview
-```
-
-Replace `PREVIEW_HOST=https://preview.invalid` in `.env.demo` with the `https://…trycloudflare.com` address
-printed in the logs, then recreate the app and worker so they load it:
-
-```bash
-docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile cloudflare-preview up -d app worker
-```
-
-The Quick Tunnel address changes when recreated; update `PREVIEW_HOST` each time. Keep the desktop powered,
-awake, and online while reviewers need access. A locked session and blank display are fine. Stop the tunnel
-profiles when the review is over. Never publish PostgreSQL or share `.env`, `.env.demo`, or `.env.tunnel` contents.
+Keep the desktop powered, awake, and online while reviewers need access. A locked session and blank display are
+fine. Stop the tunnel profiles when the review is over. Never publish PostgreSQL or share `.env`, `.env.demo`,
+or `.env.tunnel` contents.
 
 For manual development, start only PostgreSQL with `docker compose up -d db` and point the host-side
 `DATABASE_URL` at the published database port (`localhost:5432` by default). Then run from `server/`:
