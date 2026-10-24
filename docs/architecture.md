@@ -134,7 +134,7 @@ alt approved and both checks pass
   graph -> db : plan, code, review, checks
   worker -> db : publish artifacts, events, chat reply
   worker -> db : status completed
-else third rejection or escalate
+else generation budget exhausted or escalate
   worker -> db : status awaiting_user\nfiles, issues, event history
   User -> fe : guidance in the same chat, targeted to the run
   fe -> api : POST /runs/{id}/continuations {guidance}
@@ -152,8 +152,8 @@ end
   later messages and runs in that fixed project.
 - The Backend never executes the graph. The Worker owns the run lock, heartbeat, execution id, and terminal
   transitions.
-- The human is not involved during an execution. After three rejected Coder generations the run stops in
-  `awaiting_user`; guidance starts a new execution at the Planner, not at the Coder.
+- The human is not involved during an execution. When the configured total Coder generations are exhausted, the
+  run stops in `awaiting_user`; guidance continues the same run in a new execution at the Planner, not at the Coder.
 - A model-driven run can take minutes; the PostgreSQL-backed queue keeps HTTP requests short and lets the Worker
   restart independently without adding a broker.
 
@@ -342,18 +342,15 @@ repeat
     :completed;
     stop
   elseif (model or schema error?) then (yes)
-    :save memory;
     :failed;
     stop
   elseif (reviewer escalates?) then (yes)
-    :save memory;
     :checkpoint awaiting_user;
     :surface files, issues, and event history;
     stop
   elseif (coder_generations < MAX_CODER_GENERATIONS?) then (yes)
     :revise using reviewer issues;
-  else (third rejection)
-    :save memory;
+  else (generation budget exhausted)
     :checkpoint awaiting_user;
     :surface files, issues, and event history;
     stop
@@ -364,9 +361,10 @@ repeat while (next coder generation?) is (yes)
 
 `START → load project memory → planner → coder → reviewer`. A run's project comes from its bound chat; there is
 no routing or selection stage. The Reviewer runs deterministic checks before the LLM review; approval requires
-both. The Coder gets at most `MAX_CODER_GENERATIONS=3` generations per execution, revised only from Reviewer
-feedback. The third rejection or a valid `escalate` yields
-`awaiting_user`, never a false approval. Model/schema errors end the run as `failed` with no model-error retry.
+both. `MAX_CODER_GENERATIONS` defaults to three total Coder generations per execution, including the initial
+generation; the minimum is one. Revisions receive the previous Reviewer feedback. Exhaustion or a valid
+`escalate` yields `awaiting_user`, never a false approval. Model/schema errors end the run as `failed` with no
+model-error retry.
 `chat_reply` is written by the application layer, not a graph node.
 
 There is no mid-execution human input. An execution is unattended until `completed`, `failed`, or `awaiting_user`.
@@ -402,7 +400,7 @@ skinparam shadowing false
 pending --> running : worker claim
 running --> running : retry inside the execution
 running --> completed : approve + checks pass
-running --> awaiting_user : third rejection or escalate
+running --> awaiting_user : generation budget exhausted or escalate
 running --> failed : model/schema error
 awaiting_user --> pending : continue with guidance\nnew execution id
 awaiting_user --> failed : close
@@ -415,10 +413,12 @@ failed --> [*]
 reuses it; explicit guidance replaces it and starts at the Planner. Retry counts are bounded checkpoint state,
 not relational columns or product concepts. The event stream records observable execution progress.
 
-- `MAX_CODER_GENERATIONS=3` means at most three Coder generations per execution. The counter is internal to the
-  validated workflow checkpoint; a checksum or static-check failure consumes one generation.
-- The third rejection or a valid `escalate` persists the latest files and issues, then
-  stops in `awaiting_user`.
+- `MAX_CODER_GENERATIONS=3` means at most three total Coder generations per execution, including the initial
+  attempt; the minimum is one. Each generated file in the plan is produced once per generation, and a checksum
+  or static-check failure consumes that generation.
+- The generation budget is a maximum, not a target: approval exits early. Exhaustion or a valid `escalate`
+  persists the latest files and issues, explicitly reports the handoff reason, then stops in `awaiting_user`.
+- LangGraph's recursion limit is raised as needed to accommodate the configured number of Coder/Reviewer cycles.
 - `POST /runs/{id}/continuations` is valid only for `awaiting_user`. It keeps the same run and chat/project,
   records guidance, assigns a new execution id, and reruns the flow.
 - `POST /runs/{id}/close` marks an abandoned handoff `failed`. `DELETE` is destructive removal of terminal runs
@@ -430,8 +430,8 @@ not relational columns or product concepts. The event stream records observable 
 | Agent | Input | Output and validation |
 |---|---|---|
 | Planner | `project_id` resolved from the run's chat, request, chat history, relevant project memory | `Plan` plus an optional-validity `suggested_project_title`; Pydantic schema. A title is applied only to the initial run and only before manual rename. Plan has UUID4 IDs, safe relative paths, allowlisted file types, and 1–8 steps. |
-| Coder | `project_id`, latest plan/step, complete `existing_files`, step index, project memory | `Code`; path must be in the current plan; application recomputes SHA-256; complete files only, written atomically; local asset references must be relative. |
-| Reviewer | project, plan, code list, `CheckReport`, relevant memory | `Feedback` with verdict `approve`, `reject`, or `escalate`; summary, issues, optional suggested code, timestamp; Pydantic validation. |
+| Coder | `project_id`, latest plan/step, complete `existing_files`, previous Reviewer feedback on revisions, user guidance, project memory | `Code`; path must be in the current plan; application recomputes SHA-256; complete files only, written atomically; local asset references must be relative. |
+| Reviewer | original request, latest guidance, project, plan, generated code, unchanged project files, `CheckReport`, relevant memory | `Feedback` with verdict `approve`, `reject`, or `escalate`; summary, issues, optional suggested code, timestamp; Pydantic validation. |
 
 Use JSON Schema structured output for each role and Pydantic `model_validate` at the boundary; never regex-parse
 free text. The adapter may make one repair call for malformed output, recorded within the same bounded Coder
@@ -449,6 +449,8 @@ verdict. User messages always target an explicit chat and therefore a known proj
 - Stage 2: every generated `*.js` file passes `node --check`; the process has a timeout and cannot execute the
   file.
 - Both stages must pass. A failure enters the Coder retry/handoff policy and is included in the Reviewer input.
+- These checks prove file structure and JavaScript syntax only, not that the application behaves as requested;
+  the Reviewer compares requirements with the generated project files.
 - The report is `{file_structure_ok, js_syntax_ok, files_checked, syntax_checked, issues}`.
 - The Worker image must contain Node. Generated files must use relative local asset paths so the preview
   capability path keeps resolving assets.
@@ -835,7 +837,8 @@ awake and online. Ephemeral hosting requires durable external storage before dep
 | `FRONTEND_ORIGIN` | Allowed SPA origin, e.g. `http://localhost:5173` in Vite development. |
 | `PREVIEW_HOST` | Preview origin, e.g. `http://preview.localhost:8000`. |
 | `NGROK_AUTHTOKEN` | ngrok agent credential in ignored `.env.tunnel`, provided only to ngrok connector containers. Endpoint names and URLs live in committed `ngrok.yml`. |
-| `MAX_RUNS_PER_PROJECT` | Hard run cap `100`. The workflow has an internal maximum of three Coder generations per execution. |
+| `MAX_RUNS_PER_PROJECT` | Per-project run cap; default `10`. |
+| `MAX_CODER_GENERATIONS` | Total Coder generations per execution, including the initial attempt; default `3`, minimum `1`. Three means one initial attempt plus two revisions. |
 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
 | `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names. |
 | `RATE_LIMIT_ENABLED` | `true`; all bucket limits use code defaults. |
@@ -843,9 +846,8 @@ awake and online. Ephemeral hosting requires durable external storage before dep
 
 Other values are code constants: Worker poll 1s, heartbeat 15s, stale reclaim 60s, concurrency 2, Node binary
 `node`, syntax-check timeout 5s, memory caps 10 items / 4000 characters, rate-limit window 60s. Application
-secrets and the production `DATABASE_URL` belong in environment settings or ignored `.env`; the ngrok token is
-stored separately in ignored `.env.tunnel`. Public tunnel origins belong in ignored `.env.demo`.
-`.env.example`, `.env.tunnel.example`, and `.env.demo.example` contain placeholders only; verify that no
+secrets and public tunnel origins belong in ignored `.env`; the ngrok token is stored separately in ignored
+`.env.tunnel`. `.env.example` and `.env.tunnel.example` contain placeholders only; verify that no
 populated secrets are staged before committing.
 
 ### 9.4 Docker and startup

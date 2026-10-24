@@ -17,7 +17,11 @@ def test_app_and_preview_hosts_are_isolated(tmp_path) -> None:
     (static_dir / "index.html").write_text("app", encoding="utf-8")
     app = create_app(
         Settings(
+            app_env="development",
             secret_key="test-secret-key-that-is-long-enough-32",
+            public_url="http://localhost:8000",
+            frontend_origin="http://localhost:5173",
+            preview_host="http://preview.localhost:8000",
             rate_limit_enabled=False,
             data_dir=tmp_path / "data",
             static_dir=static_dir,
@@ -55,6 +59,7 @@ def test_app_and_preview_hosts_are_isolated(tmp_path) -> None:
 def test_preview_host_cannot_share_app_hostname(tmp_path) -> None:
     with pytest.raises(ValidationError, match="PREVIEW_HOST"):
         Settings(
+            app_env="development",
             secret_key="test-secret-key-that-is-long-enough-32",
             public_url="https://app.example.test",
             frontend_origin="https://app.example.test",

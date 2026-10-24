@@ -80,6 +80,7 @@ async def test_other_bad_requests_keep_temperature() -> None:
 
 def make_settings(**overrides: Any) -> Any:
     values = {
+        "app_env": "development",
         "secret_key": "test-secret",
         "azure_openai_api_key": "super-secret-key",
         "azure_openai_endpoint": "https://example.test/openai/v1/",

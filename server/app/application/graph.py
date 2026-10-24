@@ -22,7 +22,7 @@ from app.application.prompts import (
 from app.domain.enums import EventKind, FileType, ReviewerVerdict
 from app.domain.errors import ModelError
 from app.domain.models import Code, Feedback, Issue, Plan, PlanStep, validate_file_type
-from app.domain.policies import generation_budget_exhausted, is_approved, requires_handoff
+from app.domain.policies import is_approved, requires_handoff
 from app.domain.serialization import (
     checksum,
     code_payload,
@@ -48,6 +48,7 @@ class GraphState(TypedDict, total=False):
     coder_generations: int
     approved: bool
     handoff: bool
+    handoff_reason: str | None
     error: str | None
 
 
@@ -84,6 +85,10 @@ class CodingGraph:
         return workflow.compile(checkpointer=checkpointer)
 
     async def ainvoke(self, state: GraphState, config: dict[str, Any]) -> GraphState:
+        config = dict(config)
+        config["recursion_limit"] = max(
+            config.get("recursion_limit", 25), self.max_coder_generations * 2 + 2
+        )
         return await self.graph.ainvoke(state, config=config)
 
     async def planner(self, state: GraphState) -> GraphState:
@@ -168,7 +173,8 @@ class CodingGraph:
         async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
             execution_id = UUID(state["execution_id"])
-            coder_generations = state.get("coder_generations", 0) + 1
+            previous_generations = state.get("coder_generations", 0)
+            coder_generations = previous_generations + 1
             await repo.append_event(
                 run_id,
                 EventKind.STEP_STARTED,
@@ -192,6 +198,7 @@ class CodingGraph:
                         existing,
                         state.get("memory", ""),
                         state.get("guidance"),
+                        state.get("feedback") if previous_generations else None,
                     ),
                     CODER_SCHEMA,
                 )
@@ -252,13 +259,26 @@ class CodingGraph:
             )
             await repo.commit()
             plan = plan_from_payload(state["plan"])
+            code = state.get("code", [])
+            generated_paths = {item["file_path"] for item in code}
+            existing_files = {
+                path: content
+                for path, content in (await self.workspace.read_all(plan.project_id)).items()
+                if path not in generated_paths
+            }
             check_report = await self.workspace.check_readable(
                 plan.project_id, [step.file_path for step in plan.steps]
             )
             raw = await self.llm_clients["reviewer"].complete(
                 "reviewer",
                 reviewer_messages(
-                    plan, state.get("code", []), check_report, state.get("memory", "")
+                    state["message"],
+                    state.get("guidance"),
+                    plan,
+                    code,
+                    existing_files,
+                    check_report,
+                    state.get("memory", ""),
                 ),
                 REVIEWER_SCHEMA,
             )
@@ -299,16 +319,25 @@ class CodingGraph:
                 execution_id,
             )
             await repo.commit()
+            handoff = requires_handoff(
+                feedback,
+                state.get("coder_generations", 0),
+                self.max_coder_generations,
+                check_report,
+            )
+            handoff_reason = (
+                "reviewer_escalated"
+                if verdict == ReviewerVerdict.ESCALATE
+                else "generation_budget_exhausted"
+                if handoff
+                else None
+            )
             return {
                 "feedback": feedback_data,
                 "checks": checks_data,
                 "approved": is_approved(feedback, check_report),
-                "handoff": requires_handoff(
-                    feedback,
-                    state.get("coder_generations", 0),
-                    self.max_coder_generations,
-                    check_report,
-                ),
+                "handoff": handoff,
+                "handoff_reason": handoff_reason,
             }
 
     def route_after_review(self, state: GraphState) -> str:
@@ -317,9 +346,5 @@ class CodingGraph:
         if state.get("approved"):
             return "end"
         if state.get("handoff"):
-            return "end"
-        if generation_budget_exhausted(
-            state.get("coder_generations", 0), self.max_coder_generations
-        ):
             return "end"
         return "coder"

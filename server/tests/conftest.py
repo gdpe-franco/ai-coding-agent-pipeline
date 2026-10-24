@@ -84,7 +84,11 @@ def repo_factory(session_factory):
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
+        app_env="development",
         secret_key="test-secret-key-that-is-long-enough-32",
+        public_url="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+        preview_host="http://preview.localhost:8000",
         rate_limit_enabled=False,
         data_dir=tmp_path / "data",
         static_dir=tmp_path / "static",

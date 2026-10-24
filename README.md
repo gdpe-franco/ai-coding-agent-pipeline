@@ -72,11 +72,10 @@ published to the LAN by default. `docker compose down` stops the stack but prese
 The app and generated previews must use separate hostnames. The server enforces this separation; requests for
 preview files on the app hostname, or app/API routes on the preview hostname, return `404`.
 
-Keep local settings in `.env`. For a public review, copy `.env.demo.example` to ignored `.env.demo` and set
-`PUBLIC_URL` to the assigned app URL. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite development remains
-allowed; the built app uses same-origin requests. `.env.demo` overrides only the public origins for app/worker
-containers. Committed `ngrok.yml` defines the named endpoints the agent starts; its `app` endpoint pins the
-assigned domain and must match `PUBLIC_URL`.
+Copy `.env.example` to ignored `.env` and set `APP_ENV=production`, a generated strong `SECRET_KEY`, and `PUBLIC_URL`
+to the assigned app URL. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite development remains allowed; the
+built app uses same-origin requests. Committed `ngrok.yml` defines the named endpoints the agent starts; its `app`
+endpoint pins the assigned domain and must match `PUBLIC_URL`. `demo-up.sh` refreshes `PREVIEW_HOST` in `.env`.
 
 Copy `.env.tunnel.example` to ignored `.env.tunnel` and put the ngrok agent token there. The token is supplied
 only to ngrok connector containers, not the app or worker. Extra endpoints go in `ngrok.yml`; the free plan can
@@ -94,11 +93,13 @@ It brings up the database, migrations, app, worker, the ngrok app endpoint, and 
 updates it for you.
 
 Keep the desktop powered, awake, and online while reviewers need access. A locked session and blank display are
-fine. Stop the tunnel profiles when the review is over. Never publish PostgreSQL or share `.env`, `.env.demo`,
-or `.env.tunnel` contents.
+fine. Stop the tunnel profiles when the review is over. Never publish PostgreSQL or share `.env` or `.env.tunnel`
+contents.
 
-For manual development, start only PostgreSQL with `docker compose up -d db` and point the host-side
-`DATABASE_URL` at the published database port (`localhost:5432` by default). Then run from `server/`:
+For manual local development, switch the same `.env` back to `APP_ENV=development`,
+`PUBLIC_URL=http://localhost:8000`, and `PREVIEW_HOST=http://preview.localhost:8000`. Start only PostgreSQL with
+`docker compose up -d db` and point the host-side `DATABASE_URL` at the published database port (`localhost:5432`
+by default). Then run from `server/`:
 
 ```bash
 pip install -e '.[dev]'

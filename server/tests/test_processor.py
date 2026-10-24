@@ -6,8 +6,8 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from app.application.processor import RunProcessor
-from app.domain.enums import RunStatus
-from app.infrastructure.persistence.models import Artifact, ChatMessage, Project, Run
+from app.domain.enums import EventKind, RunStatus
+from app.infrastructure.persistence.models import Artifact, ChatMessage, Project, Run, RunEvent
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from tests.conftest import create_test_chat, create_test_user
 
@@ -52,6 +52,8 @@ def _result(
     *,
     approved: bool,
     handoff: bool = False,
+    handoff_reason: str | None = None,
+    coder_generations: int = 1,
     content: str = "<h1>approved</h1>",
     checksum: str = "a" * 64,
 ) -> dict:
@@ -66,6 +68,8 @@ def _result(
     return {
         "approved": approved,
         "handoff": handoff,
+        "handoff_reason": handoff_reason,
+        "coder_generations": coder_generations,
         "project_id": None,
         "plan": {"summary": "Build page", "steps": []},
         "code": code,
@@ -151,6 +155,40 @@ async def test_processor_preserves_handoff_without_approval(session_factory, rep
     assert "need your guidance before I can finish" in saved.chat_reply
     assert not hasattr(memory, "saved")
     assert saved_project.preview_ready is False
+
+
+async def test_processor_reports_exhausted_generation_budget(session_factory, repo_factory) -> None:
+    _chat, _project, running = await _running_run(session_factory, "generation-budget@example.com")
+    processor = RunProcessor(
+        repo_factory,
+        FakeGraph(
+            _result(
+                approved=False,
+                handoff=True,
+                handoff_reason="generation_budget_exhausted",
+                coder_generations=3,
+            )
+        ),
+        FakeWorkspace(),
+        FakeMemory(),
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
+
+    async with session_factory() as session:
+        saved = await session.get(Run, running.id)
+        handoff = (
+            await session.execute(
+                select(RunEvent).where(
+                    RunEvent.run_id == running.id, RunEvent.kind == EventKind.HANDOFF.value
+                )
+            )
+        ).scalar_one()
+    assert saved.status == RunStatus.AWAITING_USER
+    assert "all 3 automatic code-generation attempts" in saved.chat_reply
+    assert handoff.payload["reason"] == "generation_budget_exhausted"
 
 
 async def test_continuation_keeps_artifacts_for_each_execution(

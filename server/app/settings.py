@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     preview_host: str = "http://preview.localhost:8000"
 
-    max_runs_per_project: int = 100
+    max_runs_per_project: int = 10
+    max_coder_generations: int = Field(default=3, ge=1)
 
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""

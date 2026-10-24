@@ -48,6 +48,7 @@ class Container:
             workspace=self.workspace,
             memory=self.memory,
             repo_factory=self.repository_context,
+            max_coder_generations=self.settings.max_coder_generations,
             checkpointer=checkpointer,
         )
 

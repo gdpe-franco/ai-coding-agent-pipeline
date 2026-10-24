@@ -189,6 +189,7 @@ def load_scenario(filename: str) -> dict[str, Any]:
 async def missing_credentials_result() -> dict[str, str]:
     client = ProviderRegistry(
         Settings(
+            app_env="development",
             secret_key="evaluation-secret",
             azure_openai_api_key="",
             azure_openai_endpoint="",

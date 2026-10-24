@@ -127,6 +127,7 @@ def test_hmac_keys_are_scoped() -> None:
 
 def test_forwarded_ip_is_used_only_from_a_trusted_proxy(tmp_path) -> None:
     settings = Settings(
+        app_env="development",
         secret_key="test-secret-key-that-is-long-enough-32",
         rate_limit_enabled=True,
         trusted_proxy_cidrs="10.0.0.0/8",

@@ -122,7 +122,7 @@ def planner_reply(
     }
 
 
-def make_graph(*, planner=None, coder=None, reviewer=None, report=None):
+def make_graph(*, planner=None, coder=None, reviewer=None, report=None, max_coder_generations=3):
     repo = FakeRepo()
     workspace = FakeWorkspace(report)
     clients = {
@@ -135,6 +135,7 @@ def make_graph(*, planner=None, coder=None, reviewer=None, report=None):
         workspace=workspace,
         memory=FakeMemory(),
         repo_factory=lambda: repo,
+        max_coder_generations=max_coder_generations,
     )
     return graph, repo, workspace, clients
 
@@ -216,8 +217,43 @@ async def test_escalation_hands_off_without_fabricating_approval() -> None:
 
     assert result["approved"] is False
     assert result["handoff"] is True
+    assert result["handoff_reason"] == "reviewer_escalated"
     assert result["coder_generations"] == 1
     assert result["feedback"]["issues"] == [{"message": "Need guidance", "file_path": "index.html"}]
+
+
+async def test_rejected_review_feedback_reaches_coder_retry_and_can_approve() -> None:
+    issue = "Add coupon-expiration validation before showing success."
+    graph, _, workspace, clients = make_graph(
+        planner=[planner_reply()],
+        coder=[
+            {"file_path": "index.html", "content": "<h1>first</h1>"},
+            {"file_path": "index.html", "content": "<h1>revised</h1>"},
+        ],
+        reviewer=[
+            {
+                "verdict": "reject",
+                "summary": "Expiration is not checked.",
+                "issues": [{"message": issue, "file_path": "index.html"}],
+            },
+            {"verdict": "approve", "summary": "Expiration is checked.", "issues": []},
+        ],
+    )
+    workspace.files["shared.js"] = "function sharedBehavior() {}"
+
+    result = await graph.ainvoke(
+        base_state(feedback={"summary": "Stale previous execution feedback"}), {}
+    )
+
+    coder_requests = [messages[1]["content"] for messages in clients["coder"].messages]
+    reviewer_request = clients["reviewer"].messages[0][1]["content"]
+    assert result["approved"] is True
+    assert len(coder_requests) == 2
+    assert "Stale previous execution feedback" not in coder_requests[0]
+    assert issue not in coder_requests[0]
+    assert issue in coder_requests[1]
+    assert "build a coupon app" in reviewer_request
+    assert "sharedBehavior" in reviewer_request
 
 
 async def test_generation_budget_is_checkpoint_state_not_run_columns() -> None:
@@ -236,6 +272,47 @@ async def test_generation_budget_is_checkpoint_state_not_run_columns() -> None:
     assert result["coder_generations"] == 3
     assert result["code"][0]["content"] == "<h1>2</h1>"
     assert result["feedback"]["summary"] == "rejection 2"
+
+
+@pytest.mark.parametrize("max_coder_generations", [1, 2])
+async def test_configured_total_generation_budget_hands_off_after_last_rejection(
+    max_coder_generations: int,
+) -> None:
+    graph, _, _, clients = make_graph(
+        planner=[planner_reply()],
+        coder=[
+            {"file_path": "index.html", "content": f"<h1>{i}</h1>"}
+            for i in range(max_coder_generations)
+        ],
+        reviewer=[
+            {"verdict": "reject", "summary": f"rejection {i}", "issues": []}
+            for i in range(max_coder_generations)
+        ],
+        max_coder_generations=max_coder_generations,
+    )
+
+    result = await graph.ainvoke(base_state(), {})
+
+    assert result["coder_generations"] == max_coder_generations
+    assert clients["coder"].calls == ["coder"] * max_coder_generations
+    assert result["approved"] is False
+    assert result["handoff"] is True
+    assert result["handoff_reason"] == "generation_budget_exhausted"
+
+
+async def test_configured_budget_above_langgraph_default_recursion_limit() -> None:
+    max_generations = 13
+    graph, _, _, _ = make_graph(
+        planner=[planner_reply()],
+        coder=[{"file_path": "index.html", "content": "<h1>retry</h1>"}] * max_generations,
+        reviewer=[{"verdict": "reject", "summary": "retry", "issues": []}] * max_generations,
+        max_coder_generations=max_generations,
+    )
+
+    result = await graph.ainvoke(base_state(), {})
+
+    assert result["coder_generations"] == max_generations
+    assert result["handoff_reason"] == "generation_budget_exhausted"
 
 
 @pytest.mark.parametrize(

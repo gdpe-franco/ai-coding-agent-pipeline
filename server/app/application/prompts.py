@@ -48,14 +48,22 @@ def coder_messages(
     existing_files: dict[str, str],
     memory: str,
     guidance: str | None,
+    feedback: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
+    review = (
+        "Previous Reviewer feedback (address these issues while preserving working behavior):\n"
+        f"{_json(feedback)}\n\n"
+        if feedback
+        else ""
+    )
     return [
         {
             "role": "system",
             "content": (
                 "You are the Coder. Write one complete file, never a patch. Return the same "
                 "file_path you were given. The content must be the full final file. Obey the "
-                "requested file type and keep local assets relative."
+                "requested file type and keep local assets relative. When previous Reviewer "
+                "feedback is supplied, address it while preserving working behavior."
             ),
         },
         {
@@ -63,7 +71,8 @@ def coder_messages(
             "content": (
                 f"Plan summary: {plan_summary}\n\n"
                 f"File step: {step_name}\nPath: {file_path}\nType: {file_type}\n"
-                f"Description: {description}\n\nGuidance:\n{guidance or 'None'}\n\n"
+                f"Description: {description}\n\n{review}"
+                f"Guidance:\n{guidance or 'None'}\n\n"
                 f"Existing project files:\n{_json(existing_files)}\n\nProject memory:\n{memory or 'None'}"
             ),
         },
@@ -71,22 +80,32 @@ def coder_messages(
 
 
 def reviewer_messages(
-    plan: Plan, code: list[dict[str, Any]], checks: CheckReport, memory: str
+    request: str,
+    guidance: str | None,
+    plan: Plan,
+    code: list[dict[str, Any]],
+    existing_files: dict[str, str],
+    checks: CheckReport,
+    memory: str,
 ) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
-                "You are the Reviewer. Decide whether the generated static app satisfies the plan. "
-                "Deterministic checks already ran; approval is impossible when they fail. Return "
-                "approve, reject, or escalate. Reject with concrete issues the Coder can fix. "
-                "Escalate only when the request or plan is fundamentally ambiguous or unsafe."
+                "You are the Reviewer. Compare every explicit requirement in the request and latest "
+                "guidance against the plan and generated project files. Judge requested behavior, not "
+                "just file presence or syntax: deterministic checks only verify structure and JavaScript "
+                "parsing, not functional correctness. Reject missing or contradicted behavior with "
+                "concrete issues the Coder can fix. Do not invent requirements. Return approve, reject, "
+                "or escalate; escalate only when the request or plan is fundamentally ambiguous or unsafe."
             ),
         },
         {
             "role": "user",
             "content": (
+                f"Original request:\n{request}\n\nLatest guidance:\n{guidance or 'None'}\n\n"
                 f"Plan:\n{_json(plan)}\n\nGenerated files:\n{_json(code)}\n\n"
+                f"Other existing project files:\n{_json(existing_files)}\n\n"
                 f"Deterministic checks:\n{_json(checks)}\n\nProject memory:\n{memory or 'None'}"
             ),
         },

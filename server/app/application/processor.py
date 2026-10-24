@@ -134,12 +134,28 @@ class RunProcessor:
                 )
             elif handoff:
                 status = RunStatus.AWAITING_USER
-                reply = (
-                    f"I’ve made the requested changes, but I need your guidance before I can finish.\n\n"
-                    f"{summary}\n\nI updated {file_count_label}. Your last approved preview is unchanged."
-                )
+                handoff_reason = result.get("handoff_reason") or "reviewer_escalated"
+                if handoff_reason == "generation_budget_exhausted":
+                    attempts = result.get("coder_generations", 0)
+                    attempt_label = "attempt" if attempts == 1 else "attempts"
+                    reply = (
+                        f"I used all {attempts} automatic code-generation {attempt_label} without approval, "
+                        "so I need your guidance before continuing.\n\n"
+                        f"{summary}\n\nI updated {file_count_label}. "
+                        "Your last approved preview is unchanged."
+                    )
+                else:
+                    reply = (
+                        f"I’ve made the requested changes, but I need your guidance before I can finish.\n\n"
+                        f"{summary}\n\nI updated {file_count_label}. "
+                        "Your last approved preview is unchanged."
+                    )
                 event_kind = EventKind.HANDOFF
-                event_payload = {"summary": summary, "issues": feedback.get("issues", [])}
+                event_payload = {
+                    "reason": handoff_reason,
+                    "summary": summary,
+                    "issues": feedback.get("issues", []),
+                }
             else:
                 await self._mark_failed(
                     repo,

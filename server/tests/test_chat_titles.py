@@ -27,7 +27,7 @@ async def test_planner_title_updates_only_the_untouched_initial_chat(session_fac
 
         await repo.update_run(initial_run.id, status=RunStatus.COMPLETED)
         later_message, later_run, _ = await repo.create_chat_message(
-            owner.id, chat.id, uuid4(), "Add expiry dates", max_runs_per_project=100
+            owner.id, chat.id, uuid4(), "Add expiry dates", max_runs_per_project=10
         )
         assert later_message.run_id == later_run.id
         assert not await repo.suggest_initial_chat_title(

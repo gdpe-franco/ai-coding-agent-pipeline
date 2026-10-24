@@ -413,6 +413,7 @@ def test_rate_limiter_returns_429(tmp_path) -> None:
             return RateLimitResult(False, 1, 0, datetime.now(UTC), 10)
 
     settings = Settings(
+        app_env="development",
         secret_key="test-secret-key-that-is-long-enough-32",
         data_dir=tmp_path / "data",
         static_dir=tmp_path / "static",
@@ -437,6 +438,7 @@ def test_rate_limiter_fails_closed(tmp_path) -> None:
             raise RateLimitUnavailable("unavailable")
 
     settings = Settings(
+        app_env="development",
         secret_key="test-secret-key-that-is-long-enough-32",
         data_dir=tmp_path / "data",
         static_dir=tmp_path / "static",
