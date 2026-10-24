@@ -38,7 +38,18 @@ class FakeCompletions:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))])
+        content, usage = outcome if isinstance(outcome, tuple) else (outcome, None)
+        usage_result = (
+            SimpleNamespace(
+                prompt_tokens=usage[0], completion_tokens=usage[1], total_tokens=usage[2]
+            )
+            if usage is not None
+            else None
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            usage=usage_result,
+        )
 
 
 def make_client(completions: FakeCompletions, shared: set[str] | None = None) -> Any:
@@ -55,7 +66,8 @@ def make_client(completions: FakeCompletions, shared: set[str] | None = None) ->
 async def test_temperature_fallback_is_shared_across_clients() -> None:
     shared: set[str] = set()
     first = FakeCompletions([bad_request("unsupported_value", "temperature"), '{"ok": true}'])
-    assert await make_client(first, shared).complete("reviewer", [], SCHEMA) == {"ok": True}
+    result = await make_client(first, shared).complete("reviewer", [], SCHEMA)
+    assert result.content == {"ok": True}
     assert [call["temperature"] for call in first.calls if "temperature" in call] == [0]
     assert "temperature" not in first.calls[1]
     assert shared == {"gpt-5-mini"}
@@ -76,6 +88,52 @@ async def test_other_bad_requests_keep_temperature() -> None:
 
     assert all(call["temperature"] == 0 for call in completions.calls)
     assert shared == set()
+
+
+async def test_usage_includes_repaired_responses() -> None:
+    completions = FakeCompletions(
+        [
+            ("not json", (2, 1, 3)),
+            ('{"ok": true}', (5, 3, 8)),
+        ]
+    )
+
+    result = await make_client(completions).complete("coder", [], SCHEMA)
+
+    assert result.content == {"ok": True}
+    assert result.model_responses == 2
+    assert result.duration_ms >= 0
+    assert result.usage_complete is True
+    assert result.usage is not None
+    assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (
+        7,
+        4,
+        11,
+    )
+
+
+async def test_failed_repair_preserves_available_usage() -> None:
+    completions = FakeCompletions([("bad json", (2, 1, 3)), ("still bad", (5, 3, 8))])
+
+    with pytest.raises(ModelError) as caught:
+        await make_client(completions).complete("coder", [], SCHEMA)
+
+    assert caught.value.telemetry["usage"] == {
+        "input_tokens": 7,
+        "output_tokens": 4,
+        "total_tokens": 11,
+    }
+    assert caught.value.telemetry["model_responses"] == 2
+
+
+async def test_failed_provider_request_marks_usage_incomplete() -> None:
+    completions = FakeCompletions([("bad json", (2, 1, 3)), RuntimeError("unavailable")])
+
+    with pytest.raises(ModelError) as caught:
+        await make_client(completions).complete("coder", [], SCHEMA)
+
+    assert caught.value.telemetry["usage"]["total_tokens"] == 3
+    assert caught.value.telemetry["usage_complete"] is False
 
 
 def make_settings(**overrides: Any) -> Any:

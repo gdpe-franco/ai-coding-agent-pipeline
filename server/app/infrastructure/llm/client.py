@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 from openai.types.chat import ChatCompletion
 
-from app.application.ports import LLMClient
+from app.application.ports import LLMClient, LLMResult, TokenUsage
 from app.domain.errors import MissingCredentialsError, ModelError
 
 
@@ -58,9 +59,15 @@ class OpenAICompatibleClient(LLMClient):
 
     async def complete(
         self, role: str, messages: list[dict[str, str]], schema: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> LLMResult:
         last_error: Exception | None = None
+        started = time.perf_counter()
+        model_responses = 0
+        responses_with_usage = 0
+        usage_complete = True
+        input_tokens = output_tokens = total_tokens = 0
         for attempt in range(2):
+            response: ChatCompletion | None = None
             try:
                 request_messages = list(messages)
                 if attempt == 1:
@@ -71,17 +78,51 @@ class OpenAICompatibleClient(LLMClient):
                         }
                     )
                 response = await self._completion(role, request_messages, schema)
+                model_responses += 1
+                usage = response.usage
+                if usage is None:
+                    usage_complete = False
+                else:
+                    responses_with_usage += 1
+                    input_tokens += int(usage.prompt_tokens or 0)
+                    output_tokens += int(usage.completion_tokens or 0)
+                    total_tokens += int(usage.total_tokens or 0)
                 content = response.choices[0].message.content
                 if not content:
                     raise ModelError(f"{role} returned an empty response", tag=f"{role}_error")
                 parsed = json.loads(content)
                 if not isinstance(parsed, dict):
                     raise ModelError(f"{role} returned non-object JSON", tag=f"{role}_error")
-                return parsed
+                return LLMResult(
+                    content=parsed,
+                    usage=(
+                        TokenUsage(input_tokens, output_tokens, total_tokens)
+                        if responses_with_usage
+                        else None
+                    ),
+                    model_responses=model_responses,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    usage_complete=usage_complete,
+                )
             except Exception as exc:  # noqa: BLE001 - normalized as a model error
+                if response is None:
+                    usage_complete = False
                 last_error = exc
+        failed_result = LLMResult(
+            content={},
+            usage=(
+                TokenUsage(input_tokens, output_tokens, total_tokens)
+                if responses_with_usage
+                else None
+            ),
+            model_responses=model_responses,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            usage_complete=usage_complete,
+        )
         raise ModelError(
-            f"{role} model call failed: {last_error}", tag=f"{role}_error"
+            f"{role} model call failed: {last_error}",
+            tag=f"{role}_error",
+            telemetry=failed_result.telemetry(),
         ) from last_error
 
 
@@ -91,7 +132,7 @@ class UnavailableLLMClient(LLMClient):
 
     async def complete(
         self, role: str, messages: list[dict[str, str]], schema: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> LLMResult:
         raise MissingCredentialsError(self.setting)
 
 

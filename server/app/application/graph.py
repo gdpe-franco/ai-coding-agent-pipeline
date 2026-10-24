@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
@@ -19,6 +21,7 @@ from app.application.prompts import (
     planner_messages,
     reviewer_messages,
 )
+from app.application.usage import merge_usage
 from app.domain.enums import EventKind, FileType, ReviewerVerdict
 from app.domain.errors import ModelError
 from app.domain.models import Code, Feedback, Issue, Plan, PlanStep, validate_file_type
@@ -30,6 +33,8 @@ from app.domain.serialization import (
     plan_from_payload,
     plan_payload,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GraphState(TypedDict, total=False):
@@ -49,6 +54,7 @@ class GraphState(TypedDict, total=False):
     approved: bool
     handoff: bool
     handoff_reason: str | None
+    token_usage: dict[str, Any]
     error: str | None
 
 
@@ -92,6 +98,7 @@ class CodingGraph:
         return await self.graph.ainvoke(state, config=config)
 
     async def planner(self, state: GraphState) -> GraphState:
+        step_started = time.perf_counter()
         async with self.repo_factory() as repo:
             project_id = UUID(state["project_id"])
             run_id = UUID(state["run_id"])
@@ -109,15 +116,20 @@ class CodingGraph:
                 }
                 for turn in turns[-20:]
             ]
-            raw = await self.llm_clients["planner"].complete(
+            llm_result = await self.llm_clients["planner"].complete(
                 "planner",
                 planner_messages(state["message"], memory, chat_history, state.get("guidance")),
                 PLANNER_SCHEMA,
             )
+            step_usage = llm_result.telemetry()
             try:
-                parsed = PlannerResponse.model_validate(raw)
+                parsed = PlannerResponse.model_validate(llm_result.content)
             except Exception as exc:
-                raise ModelError(f"invalid planner output: {exc}", tag="planner_error") from exc
+                raise ModelError(
+                    f"invalid planner output: {exc}",
+                    tag="planner_error",
+                    telemetry=step_usage,
+                ) from exc
             suggested_title = parsed.suggested_project_title
             if suggested_title:
                 suggested_title = " ".join(suggested_title.split())
@@ -146,10 +158,26 @@ class CodingGraph:
             await repo.append_event(
                 run_id,
                 EventKind.STEP_COMPLETED,
-                {"step_key": "planner", "plan": plan_payload(plan)},
+                {
+                    "step_key": "planner",
+                    "plan": plan_payload(plan),
+                    "model_usage": step_usage,
+                },
                 execution_id,
             )
             await repo.commit()
+            token_usage = merge_usage(state.get("token_usage"), step_usage)
+            logger.info(
+                "agent_step_completed",
+                extra={
+                    "event": "agent_step_completed",
+                    "run_id": state["run_id"],
+                    "execution_id": state["execution_id"],
+                    "step_key": "planner",
+                    "duration_ms": round((time.perf_counter() - step_started) * 1000),
+                    "model_usage": step_usage,
+                },
+            )
             return {
                 "plan": {
                     "id": str(plan.id),
@@ -167,9 +195,11 @@ class CodingGraph:
                     ],
                 },
                 "memory": memory,
+                "token_usage": token_usage,
             }
 
     async def coder(self, state: GraphState) -> GraphState:
+        step_started = time.perf_counter()
         async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
             execution_id = UUID(state["execution_id"])
@@ -185,33 +215,42 @@ class CodingGraph:
             plan = plan_from_payload(state["plan"])
             allowed_paths = {step.file_path for step in plan.steps}
             code: list[dict[str, Any]] = []
+            generation_usage = None
             for step in plan.steps:
                 existing = await self.workspace.read_all(plan.project_id)
-                raw = await self.llm_clients["coder"].complete(
-                    "coder",
-                    coder_messages(
-                        step.name,
-                        step.file_path,
-                        step.file_type.value,
-                        plan.summary,
-                        step.description,
-                        existing,
-                        state.get("memory", ""),
-                        state.get("guidance"),
-                        state.get("feedback") if previous_generations else None,
-                    ),
-                    CODER_SCHEMA,
-                )
                 try:
-                    parsed = CoderResponse.model_validate(raw)
+                    llm_result = await self.llm_clients["coder"].complete(
+                        "coder",
+                        coder_messages(
+                            step.name,
+                            step.file_path,
+                            step.file_type.value,
+                            plan.summary,
+                            step.description,
+                            existing,
+                            state.get("memory", ""),
+                            state.get("guidance"),
+                            state.get("feedback") if previous_generations else None,
+                        ),
+                        CODER_SCHEMA,
+                    )
+                except ModelError as exc:
+                    generation_usage = merge_usage(generation_usage, exc.telemetry)
+                    raise ModelError(str(exc), tag=exc.tag, telemetry=generation_usage) from exc
+                generation_usage = merge_usage(generation_usage, llm_result.telemetry())
+                try:
+                    parsed = CoderResponse.model_validate(llm_result.content)
                 except Exception as exc:
                     raise ModelError(
-                        f"invalid coder output for {step.file_path}: {exc}", tag="coder_error"
+                        f"invalid coder output for {step.file_path}: {exc}",
+                        tag="coder_error",
+                        telemetry=generation_usage,
                     ) from exc
                 if parsed.file_path != step.file_path:
                     raise ModelError(
                         f"coder returned {parsed.file_path}, expected {step.file_path}",
                         tag="coder_error",
+                        telemetry=generation_usage,
                     )
                 await self.workspace.write_file(
                     plan.project_id, parsed.file_path, parsed.content, allowed_paths
@@ -234,6 +273,7 @@ class CodingGraph:
                         {"file_path": item["file_path"], "checksum": item["checksum"]}
                         for item in code
                     ],
+                    "model_usage": generation_usage,
                 },
                 execution_id,
             )
@@ -245,12 +285,28 @@ class CodingGraph:
             )
             await repo.update_run(run_id, latest_code=code)
             await repo.commit()
+            token_usage = merge_usage(state.get("token_usage"), generation_usage)
+            logger.info(
+                "agent_step_completed",
+                extra={
+                    "event": "agent_step_completed",
+                    "run_id": state["run_id"],
+                    "execution_id": state["execution_id"],
+                    "step_key": "coder",
+                    "generation": coder_generations,
+                    "files_written": len(code),
+                    "duration_ms": round((time.perf_counter() - step_started) * 1000),
+                    "model_usage": generation_usage,
+                },
+            )
             return {
                 "code": code,
                 "coder_generations": coder_generations,
+                "token_usage": token_usage,
             }
 
     async def reviewer(self, state: GraphState) -> GraphState:
+        step_started = time.perf_counter()
         async with self.repo_factory() as repo:
             run_id = UUID(state["run_id"])
             execution_id = UUID(state["execution_id"])
@@ -269,7 +325,7 @@ class CodingGraph:
             check_report = await self.workspace.check_readable(
                 plan.project_id, [step.file_path for step in plan.steps]
             )
-            raw = await self.llm_clients["reviewer"].complete(
+            llm_result = await self.llm_clients["reviewer"].complete(
                 "reviewer",
                 reviewer_messages(
                     state["message"],
@@ -282,10 +338,15 @@ class CodingGraph:
                 ),
                 REVIEWER_SCHEMA,
             )
+            step_usage = llm_result.telemetry()
             try:
-                parsed = ReviewerResponse.model_validate(raw)
+                parsed = ReviewerResponse.model_validate(llm_result.content)
             except Exception as exc:
-                raise ModelError(f"invalid reviewer output: {exc}", tag="reviewer_error") from exc
+                raise ModelError(
+                    f"invalid reviewer output: {exc}",
+                    tag="reviewer_error",
+                    telemetry=step_usage,
+                ) from exc
             verdict = ReviewerVerdict(parsed.verdict)
             if verdict == ReviewerVerdict.APPROVE and not check_report.ok:
                 verdict = ReviewerVerdict.REJECT
@@ -315,10 +376,23 @@ class CodingGraph:
                         for issue in feedback.issues
                     ],
                     "checks": checks_data,
+                    "model_usage": step_usage,
                 },
                 execution_id,
             )
             await repo.commit()
+            token_usage = merge_usage(state.get("token_usage"), step_usage)
+            logger.info(
+                "agent_step_completed",
+                extra={
+                    "event": "agent_step_completed",
+                    "run_id": state["run_id"],
+                    "execution_id": state["execution_id"],
+                    "step_key": "reviewer",
+                    "duration_ms": round((time.perf_counter() - step_started) * 1000),
+                    "model_usage": step_usage,
+                },
+            )
             handoff = requires_handoff(
                 feedback,
                 state.get("coder_generations", 0),
@@ -338,6 +412,7 @@ class CodingGraph:
                 "approved": is_approved(feedback, check_report),
                 "handoff": handoff,
                 "handoff_reason": handoff_reason,
+                "token_usage": token_usage,
             }
 
     def route_after_review(self, state: GraphState) -> str:

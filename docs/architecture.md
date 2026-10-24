@@ -423,6 +423,8 @@ not relational columns or product concepts. The event stream records observable 
   records guidance, assigns a new execution id, and reruns the flow.
 - `POST /runs/{id}/close` marks an abandoned handoff `failed`. `DELETE` is destructive removal of terminal runs
   only.
+- Completion, handoff, and failure events include aggregate model usage when available; Coder usage is combined
+  across files per generation, not recorded per file.
 - Validate the whole state before each checkpoint. The Reviewer uses `temperature=0`.
 
 ### 5.3 Agent contracts
@@ -863,6 +865,11 @@ target.
 - `migrate`: one-shot `alembic upgrade head`, after PostgreSQL is healthy and before app/worker startup.
 - Optional `ngrok` and `cloudflared-preview` profiles expose only the app listener. `ngrok` runs `start --all`
   over committed `ngrok.yml` and gets its token from ignored `.env.tunnel`; Quick Tunnel needs no credential.
+- Application request/run/agent logs and worker logs are JSON lines; Gunicorn/Uvicorn startup messages retain
+  their standard format. Docker stores all container output with the `json-file` driver, rotated at 10 MB with
+  three files per container; inspect them with `docker compose logs`.
+- HTTP logs use request IDs and route templates, while worker logs correlate by run and execution ID. Do not log
+  prompts, generated files, credentials, or raw request URLs.
 - Runtime Node is required for `node --check`. Do not create application tables with `create_all`.
 - Long-running services use `restart: unless-stopped`; `docker compose down` preserves named volumes.
   `docker compose down -v` deletes local database and workspace data.

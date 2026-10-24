@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -44,6 +45,21 @@ def test_register_login_and_me(client: TestClient) -> None:
 def test_missing_token_is_unauthorized(client: TestClient) -> None:
     assert client.get("/api/v1/chats").status_code == 401
     assert client.post("/api/v1/chats").status_code == 401
+
+
+def test_request_log_has_route_template_and_response_request_id(client: TestClient, caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="app.main"):
+        response = client.get("/api/v1/chats")
+
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "http_request_completed"
+    )
+    assert response.status_code == 401
+    assert response.headers["X-Request-ID"] == record.request_id
+    assert record.route == "/chats"
+    assert not hasattr(record, "path")
 
 
 def test_first_message_atomically_creates_owned_chat_project_and_run(client: TestClient) -> None:

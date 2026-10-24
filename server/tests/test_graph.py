@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Self
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.application.graph import CodingGraph
+from app.application.ports import LLMResult, TokenUsage
 from app.domain.enums import EventKind
 from app.domain.errors import ModelError
 from app.domain.models import CheckReport, Plan
@@ -90,17 +91,20 @@ class FakeMemory:
 
 
 class ScriptedLLM:
-    def __init__(self, replies: list[dict]) -> None:
+    def __init__(self, replies: list[Any]) -> None:
         self.replies = list(replies)
         self.calls: list[str] = []
         self.messages: list[list[dict[str, str]]] = []
 
-    async def complete(self, role: str, messages, schema) -> dict:
+    async def complete(self, role: str, messages, schema) -> LLMResult:
         self.calls.append(role)
         self.messages.append(messages)
         if not self.replies:
             raise AssertionError(f"unexpected {role} call")
-        return self.replies.pop(0)
+        reply = self.replies.pop(0)
+        if isinstance(reply, LLMResult):
+            return reply
+        return LLMResult(reply, None, 1, 0, False)
 
 
 def planner_reply(
@@ -254,6 +258,72 @@ async def test_rejected_review_feedback_reaches_coder_retry_and_can_approve() ->
     assert issue in coder_requests[1]
     assert "build a coupon app" in reviewer_request
     assert "sharedBehavior" in reviewer_request
+
+
+async def test_execution_usage_aggregates_coder_files_without_file_breakdown() -> None:
+    planner = {
+        "summary": "A two-file page",
+        "suggested_project_title": "Coupon Validator",
+        "steps": [
+            {
+                "name": "Page",
+                "file_path": "index.html",
+                "file_type": "html",
+                "description": "Main page",
+            },
+            {
+                "name": "Behavior",
+                "file_path": "app.js",
+                "file_type": "js",
+                "description": "Coupon behavior",
+            },
+        ],
+    }
+    graph, repo, _, _ = make_graph(
+        planner=[LLMResult(planner, TokenUsage(2, 3, 5), 1, 10, True)],
+        coder=[
+            LLMResult(
+                {"file_path": "index.html", "content": "<h1>Coupons</h1>"},
+                TokenUsage(4, 5, 9),
+                1,
+                20,
+                True,
+            ),
+            LLMResult(
+                {"file_path": "app.js", "content": "function validate() {}"},
+                TokenUsage(10, 11, 21),
+                1,
+                30,
+                True,
+            ),
+        ],
+        reviewer=[
+            LLMResult(
+                {"verdict": "approve", "summary": "Looks good", "issues": []},
+                TokenUsage(6, 7, 13),
+                1,
+                40,
+                True,
+            )
+        ],
+    )
+
+    result = await graph.ainvoke(base_state(), {})
+
+    assert result["approved"] is True
+    assert result["token_usage"] == {
+        "model_responses": 4,
+        "duration_ms": 100,
+        "usage": {"input_tokens": 22, "output_tokens": 26, "total_tokens": 48},
+        "usage_complete": True,
+    }
+    generation = next(event[2] for event in repo.events if event[1] == EventKind.GENERATION.value)
+    assert generation["model_usage"]["usage"] == {
+        "input_tokens": 14,
+        "output_tokens": 16,
+        "total_tokens": 30,
+    }
+    assert "file_path" not in generation["model_usage"]
 
 
 async def test_generation_budget_is_checkpoint_state_not_run_columns() -> None:

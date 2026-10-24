@@ -92,6 +92,11 @@ It brings up the database, migrations, app, worker, the ngrok app endpoint, and 
 `docker compose down`. The Quick Tunnel address changes when that tunnel restarts, which is why the script
 updates it for you.
 
+Application request/run/agent logs and worker logs are JSON lines; Gunicorn/Uvicorn startup messages retain their
+standard format. Docker stores all container output with the rotating `json-file` driver. Follow app and worker
+logs with `docker compose logs -f --tail=200 app worker`. Run-event details include aggregate model token usage
+when the provider returns it; Coder usage is combined across files for each generation.
+
 Keep the desktop powered, awake, and online while reviewers need access. A locked session and blank display are
 fine. Stop the tunnel profiles when the review is over. Never publish PostgreSQL or share `.env` or `.env.tunnel`
 contents.

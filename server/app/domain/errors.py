@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 class DomainError(Exception):
     """Base class for expected domain failures."""
@@ -22,8 +24,14 @@ class InvalidTransitionError(DomainError):
 
 
 class ModelError(DomainError):
-    def __init__(self, message: str, tag: str = "model_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        tag: str = "model_error",
+        telemetry: dict[str, Any] | None = None,
+    ) -> None:
         self.tag = tag
+        self.telemetry = telemetry
         super().__init__(message)
 
 

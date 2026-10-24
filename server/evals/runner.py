@@ -9,6 +9,7 @@ from typing import Any, Self
 from uuid import UUID, uuid4
 
 from app.application.graph import CodingGraph
+from app.application.ports import LLMResult
 from app.domain.errors import MissingCredentialsError, ModelError
 from app.domain.models import CheckReport, Plan
 from app.infrastructure.llm.client import ProviderRegistry
@@ -85,10 +86,10 @@ class ScriptedLLM:
     def __init__(self, replies: list[dict]) -> None:
         self.replies = list(replies)
 
-    async def complete(self, role: str, messages, schema) -> dict:
+    async def complete(self, role: str, messages, schema) -> LLMResult:
         if not self.replies:
             raise AssertionError(f"unexpected {role} call")
-        return self.replies.pop(0)
+        return LLMResult(self.replies.pop(0), None, 1, 0, False)
 
 
 def planner(*files: str) -> dict:

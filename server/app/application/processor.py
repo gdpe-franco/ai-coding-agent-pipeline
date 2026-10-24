@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,16 @@ class RunProcessor:
 
     async def process(self, run: RunState) -> None:
         thread_id = f"{run.id}:{run.execution_id}"
+        started = time.perf_counter()
+        logger.info(
+            "run_execution_started",
+            extra={
+                "event": "run_execution_started",
+                "run_id": str(run.id),
+                "execution_id": str(run.execution_id),
+                "worker_id": self.worker_id,
+            },
+        )
         heartbeat = asyncio.create_task(self._heartbeat_loop(run.id))
         try:
             async with self.repo_factory() as repo:
@@ -59,10 +70,39 @@ class RunProcessor:
             }
             result = await self.graph.ainvoke(state, {"configurable": {"thread_id": thread_id}})
             await self._finalize(run.id, result)
+            logger.info(
+                "run_execution_finished",
+                extra={
+                    "event": "run_execution_finished",
+                    "run_id": str(run.id),
+                    "execution_id": str(run.execution_id),
+                    "worker_id": self.worker_id,
+                    "status": (
+                        "completed"
+                        if result.get("approved")
+                        else "awaiting_user"
+                        if result.get("handoff")
+                        else "failed"
+                    ),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "model_usage": result.get("token_usage"),
+                },
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("run %s failed", run.id)
+            logger.exception(
+                "run_execution_failed",
+                extra={
+                    "event": "run_execution_failed",
+                    "run_id": str(run.id),
+                    "execution_id": str(run.execution_id),
+                    "worker_id": self.worker_id,
+                    "error_tag": getattr(exc, "tag", "internal_error"),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "model_usage": getattr(exc, "telemetry", None),
+                },
+            )
             await self._fail(run.id, exc)
         finally:
             heartbeat.cancel()
@@ -82,7 +122,11 @@ class RunProcessor:
                 async with self.repo_factory() as repo:
                     await repo.heartbeat(self.worker_id, run_id)
             except Exception:
-                logger.warning("worker heartbeat failed", exc_info=True)
+                logger.warning(
+                    "worker_heartbeat_failed",
+                    extra={"event": "worker_heartbeat_failed", "run_id": str(run_id)},
+                    exc_info=True,
+                )
 
     async def _finalize(self, run_id: UUID, result: dict[str, Any]) -> None:
         async with self.repo_factory() as repo:
@@ -128,7 +172,11 @@ class RunProcessor:
                     f"I updated {file_count_label}. File checks and required JavaScript syntax checks passed."
                 )
                 event_kind = EventKind.RUN_COMPLETED
-                event_payload = {"summary": summary, "files": len(files)}
+                event_payload = {
+                    "summary": summary,
+                    "files": len(files),
+                    "model_usage": result.get("token_usage"),
+                }
                 await self.memory.save_project_memory(
                     project_id, f"Completed request: {run.message}\nResult: {summary}"[:4000]
                 )
@@ -155,6 +203,7 @@ class RunProcessor:
                     "reason": handoff_reason,
                     "summary": summary,
                     "issues": feedback.get("issues", []),
+                    "model_usage": result.get("token_usage"),
                 }
             else:
                 await self._mark_failed(
@@ -194,6 +243,7 @@ class RunProcessor:
                 self._failure_reply(exc),
                 tag=getattr(exc, "tag", "internal_error"),
                 diagnostic=diagnostic,
+                model_usage=getattr(exc, "telemetry", None),
             )
 
     @staticmethod
@@ -225,13 +275,17 @@ class RunProcessor:
         message: str,
         tag: str = "internal_error",
         diagnostic: str | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> None:
+        event_payload = {"tag": tag, "message": (diagnostic or message)[:2000]}
+        if model_usage is not None:
+            event_payload["model_usage"] = model_usage
         await repo.finalize_run(
             run.id,
             RunStatus.FAILED,
             message,
             EventKind.RUN_FAILED,
-            {"tag": tag, "message": (diagnostic or message)[:2000]},
+            event_payload,
             error=(diagnostic or message)[:2000],
         )
 

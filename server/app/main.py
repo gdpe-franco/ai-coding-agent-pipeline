@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -9,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.infrastructure.container import Container
+from app.infrastructure.logging_config import configure_logging
 from app.interfaces.api import chats, health, preview, projects, runs
 from app.interfaces.dependencies import build_fastapi_users
 from app.interfaces.middleware.host_isolation import HostIsolationMiddleware
@@ -16,9 +20,13 @@ from app.interfaces.middleware.rate_limit import RateLimitMiddleware
 from app.interfaces.schemas.users import UserCreate, UserRead, UserUpdate
 from app.settings import Settings
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or Settings()
+    if settings is None:
+        settings = Settings()
+        configure_logging(settings.log_level)
     container = Container(settings)
 
     @asynccontextmanager
@@ -51,6 +59,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app_hosts=app_hosts,
         preview_host=(urlsplit(settings.preview_host).hostname or "").rstrip(".").lower(),
     )
+
+    @app.middleware("http")
+    async def log_request(request: Request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        request_id = uuid4().hex
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            logger.exception(
+                "http_request_failed",
+                extra={
+                    "event": "http_request_failed",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "route": getattr(request.scope.get("route"), "path", "unmatched"),
+                    "status_code": 500,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "http_request_completed",
+            extra={
+                "event": "http_request_completed",
+                "request_id": request_id,
+                "method": request.method,
+                "route": getattr(request.scope.get("route"), "path", "unmatched"),
+                "status_code": response.status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+            },
+        )
+        return response
 
     fastapi_users, auth_backend = build_fastapi_users(settings)
     app.include_router(

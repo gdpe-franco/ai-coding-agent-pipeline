@@ -17,6 +17,7 @@ from app.application.processor import RunProcessor
 from app.domain.errors import WorkspaceError
 from app.domain.models import RunState
 from app.infrastructure.container import Container
+from app.infrastructure.logging_config import configure_logging
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from app.settings import Settings
 
@@ -91,7 +92,10 @@ async def run_maintenance(
                 }
                 await workspace.archive_run(project_id, run.id, files)
             except OSError, WorkspaceError:
-                logger.exception("could not archive completed run %s", run.id)
+                logger.exception(
+                    "archive_failed",
+                    extra={"event": "archive_failed", "run_id": str(run.id)},
+                )
                 continue
             await repo.mark_run_archived(run.id)
 
@@ -116,7 +120,9 @@ async def _maintenance_loop(
                 stale_after_seconds=stale_after_seconds,
             )
         except Exception:
-            logger.exception("worker maintenance failed")
+            logger.exception(
+                "worker_maintenance_failed", extra={"event": "worker_maintenance_failed"}
+            )
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=MAINTENANCE_INTERVAL_SECONDS)
         except TimeoutError:
@@ -126,7 +132,7 @@ async def _maintenance_loop(
 async def run_worker(settings: Settings) -> None:
     container = Container(settings)
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    logger.info("worker %s starting", worker_id)
+    logger.info("worker_starting", extra={"event": "worker_starting", "worker_id": worker_id})
     try:
         async with AsyncPostgresSaver.from_conn_string(settings.psycopg_url) as saver:
             await saver.setup()
@@ -150,7 +156,14 @@ async def run_worker(settings: Settings) -> None:
                         )
                         await repo.heartbeat(worker_id, run.id if run else None)
                     if run is not None:
-                        logger.info("worker %s claimed run %s", worker_id, run.id)
+                        logger.info(
+                            "run_claimed",
+                            extra={
+                                "event": "run_claimed",
+                                "worker_id": worker_id,
+                                "run_id": str(run.id),
+                            },
+                        )
                     return run
 
                 async def release_run(run_id: UUID) -> None:
@@ -193,11 +206,9 @@ async def run_worker(settings: Settings) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "info").upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    asyncio.run(run_worker(Settings()))
+    settings = Settings()
+    configure_logging(settings.log_level)
+    asyncio.run(run_worker(settings))
 
 
 if __name__ == "__main__":

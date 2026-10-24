@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.application.processor import RunProcessor
 from app.domain.enums import EventKind, RunStatus
+from app.domain.errors import ModelError
 from app.infrastructure.persistence.models import Artifact, ChatMessage, Project, Run, RunEvent
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
 from tests.conftest import create_test_chat, create_test_user
@@ -54,6 +55,7 @@ def _result(
     handoff: bool = False,
     handoff_reason: str | None = None,
     coder_generations: int = 1,
+    token_usage: dict | None = None,
     content: str = "<h1>approved</h1>",
     checksum: str = "a" * 64,
 ) -> dict:
@@ -70,6 +72,7 @@ def _result(
         "handoff": handoff,
         "handoff_reason": handoff_reason,
         "coder_generations": coder_generations,
+        "token_usage": token_usage,
         "project_id": None,
         "plan": {"summary": "Build page", "steps": []},
         "code": code,
@@ -167,6 +170,12 @@ async def test_processor_reports_exhausted_generation_budget(session_factory, re
                 handoff=True,
                 handoff_reason="generation_budget_exhausted",
                 coder_generations=3,
+                token_usage={
+                    "model_responses": 7,
+                    "duration_ms": 12000,
+                    "usage": {"input_tokens": 300, "output_tokens": 120, "total_tokens": 420},
+                    "usage_complete": True,
+                },
             )
         ),
         FakeWorkspace(),
@@ -189,6 +198,7 @@ async def test_processor_reports_exhausted_generation_budget(session_factory, re
     assert saved.status == RunStatus.AWAITING_USER
     assert "all 3 automatic code-generation attempts" in saved.chat_reply
     assert handoff.payload["reason"] == "generation_budget_exhausted"
+    assert handoff.payload["model_usage"]["usage"]["total_tokens"] == 420
 
 
 async def test_continuation_keeps_artifacts_for_each_execution(
@@ -275,3 +285,35 @@ async def test_processor_records_failure_and_keeps_chat_message(
         "Build the app",
         "Something went wrong while working on this request. The run has stopped, and its technical details are available in run history.",
     ]
+
+
+async def test_processor_persists_usage_metadata_on_model_failure(
+    session_factory, repo_factory
+) -> None:
+    _chat, _project, running = await _running_run(session_factory, "usage-failure@example.com")
+    usage = {
+        "model_responses": 2,
+        "duration_ms": 450,
+        "usage": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+        "usage_complete": True,
+    }
+    processor = RunProcessor(
+        repo_factory,
+        FakeGraph(ModelError("invalid response", tag="coder_error", telemetry=usage)),
+        FakeWorkspace(),
+        FakeMemory(),
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
+
+    async with session_factory() as session:
+        failed = (
+            await session.execute(
+                select(RunEvent).where(
+                    RunEvent.run_id == running.id, RunEvent.kind == EventKind.RUN_FAILED.value
+                )
+            )
+        ).scalar_one()
+    assert failed.payload["model_usage"] == usage

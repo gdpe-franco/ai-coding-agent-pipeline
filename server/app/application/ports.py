@@ -15,6 +15,38 @@ from app.domain.models import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class LLMResult:
+    content: dict[str, Any]
+    usage: TokenUsage | None
+    model_responses: int
+    duration_ms: int
+    usage_complete: bool
+
+    def telemetry(self) -> dict[str, Any]:
+        return {
+            "model_responses": self.model_responses,
+            "duration_ms": self.duration_ms,
+            "usage": (
+                {
+                    "input_tokens": self.usage.input_tokens,
+                    "output_tokens": self.usage.output_tokens,
+                    "total_tokens": self.usage.total_tokens,
+                }
+                if self.usage is not None
+                else None
+            ),
+            "usage_complete": self.usage_complete and self.model_responses > 0,
+        }
+
+
 @dataclass(slots=True)
 class RateLimitResult:
     allowed: bool
@@ -27,7 +59,7 @@ class RateLimitResult:
 class LLMClient(Protocol):
     async def complete(
         self, role: str, messages: list[dict[str, str]], schema: dict[str, Any]
-    ) -> dict[str, Any]: ...
+    ) -> LLMResult: ...
 
 
 class Workspace(Protocol):
