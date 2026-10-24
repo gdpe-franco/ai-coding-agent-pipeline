@@ -191,7 +191,7 @@ test("project chats keep their runs, history, and context across switching and r
       await reply({ message_id: `message-${messageNumber}`, run_id: run.id, status: run.status }, 202);
     } else if (path.startsWith("/chats/") && path.endsWith("/runs")) {
       const chatId = path.split("/")[2];
-      await reply([...runs.values()].filter((run) => run.chat_id === chatId));
+      await reply([...runs.values()].filter((run) => run.chat_id === chatId).reverse());
     } else if (path.startsWith("/chats/") && method === "GET") {
       const chat = chats.get(path.split("/")[2]);
       const suggestedTitle = titleSuggestions.get(chat?.id ?? "");
@@ -278,6 +278,10 @@ test("project chats keep their runs, history, and context across switching and r
   await page.getByLabel("Email").fill("browser@example.com");
   await page.getByLabel("Password").fill("test-password");
   await page.locator("form").getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#app-sidebar img")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "AI Coding Multi-Agent home" })).toBeVisible();
+  await expect(page.getByText("browser@example.com")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
   await page.getByRole("button", { name: "New chat" }).last().click();
   await page.getByRole("textbox", { name: "Describe your project" }).fill("Build a coupon validator");
   await page.getByRole("button", { name: "Create project and start" }).click();
@@ -294,15 +298,30 @@ test("project chats keep their runs, history, and context across switching and r
   await page.getByRole("link", { name: "View details" }).first().click();
   await expect(page.getByText("index.html", { exact: true }).first()).toBeVisible();
   await expect(page.locator('iframe[title="Generated app preview"]')).toHaveCount(0);
-  await page.getByRole("link", { name: "Coupon app" }).click();
-  await page.getByRole("link", { name: "Project", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Coupon app" })).toBeVisible();
+  await expect(page.getByText("run-1", { exact: true })).toBeVisible();
+  await expect(page.getByText("Selected run", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Open latest approved preview" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("region", { name: "Files" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Event timeline" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.setViewportSize({ width: 1440, height: 900 });
   const [previewPage] = await Promise.all([
     page.context().waitForEvent("page"),
-    page.getByRole("link", { name: "Open approved preview" }).click(),
+    page.getByRole("link", { name: "Open latest approved preview" }).click(),
   ]);
   await expect(previewPage.getByRole("heading", { name: "Generated preview" })).toBeVisible();
   await previewPage.close();
-  await page.getByRole("link", { name: "Coupon app" }).click();
+  await page.getByRole("link", { name: "Back to chat" }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View details" }).first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.getByRole("button", { name: "Open sidebar" }).click();
+  await expect(page.getByRole("link", { name: "Coupon app" })).toBeVisible();
+  await page.getByRole("button", { name: "Close sidebar" }).click();
+  await page.setViewportSize({ width: 1280, height: 800 });
 
   await page.getByRole("textbox", { name: "Message" }).fill("Add a score counter");
   await page.getByRole("button", { name: "Send" }).click();
@@ -336,11 +355,27 @@ test("project chats keep their runs, history, and context across switching and r
   await expect(page.getByText("Build a coupon validator").first()).toBeVisible();
   await expect(page.getByText("Keep the layout and add the counter")).toBeVisible();
   await expect(page.getByText("Add a high-score display")).toBeVisible();
-  await page.getByRole("link", { name: "Project", exact: true }).click();
+  await page.getByRole("link", { name: "View details" }).first().click();
   await expect(page.getByRole("heading", { name: "Coupon app" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open approved preview" })).toBeVisible();
-  await page.getByRole("link", { name: "Coupon app" }).click();
+  await expect(page.getByRole("link", { name: "Open latest approved preview" })).toBeVisible();
+  await page.getByRole("link", { name: "Back to chat" }).click();
   await page.getByRole("link", { name: "Run history" }).click();
   await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Runs" }).getByRole("listitem")).toHaveCount(3);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole("button", { name: "Collapse sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Open sidebar" })).toBeVisible();
+  await expect(page.locator("#app-sidebar img")).toHaveAttribute("src", "/favicon.svg?v=2");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
+  await page.getByRole("button", { name: "Open sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Open sidebar" })).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Open sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Open sidebar" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Close sidebar" })).toBeVisible();
+  await page.getByRole("button", { name: "Close sidebar" }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.goto("/projects/project-1");
+  await expect(page.getByRole("heading", { name: "Coupon app" })).toBeVisible();
 });

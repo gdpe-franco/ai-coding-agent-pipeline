@@ -105,6 +105,10 @@
     @apply inline-flex items-center justify-center rounded-lg border border-line bg-transparent px-4 py-2 font-medium text-paper-dim transition hover:border-line-strong hover:bg-hover hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-ink disabled:cursor-not-allowed disabled:opacity-45;
   }
 
+  .icon-button {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-paper-dim transition hover:bg-hover hover:text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent;
+  }
+
   .input {
     @apply w-full rounded-lg border border-line bg-ink px-3 py-2 text-paper placeholder:text-faint outline-none transition focus:border-accent;
   }

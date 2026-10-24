@@ -104,8 +104,11 @@ async function selectFile(path: string) {
       <slot name="actions" />
     </header>
     <p v-if="files.length === 0" class="text-sm text-muted">No files yet.</p>
-    <div v-else class="grid min-h-64 gap-4 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.5fr)]">
-      <nav class="max-h-[32rem] overflow-auto border-r border-line pr-3" :aria-label="`${title} file tree`">
+    <div v-else class="grid min-h-64 min-w-0 gap-4 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.5fr)]">
+      <nav
+        class="max-h-56 min-w-0 overflow-auto border-b border-line pb-3 sm:max-h-64 lg:max-h-[32rem] lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3"
+        :aria-label="`${title} file tree`"
+      >
         <ul class="space-y-1">
           <li v-for="{ branch, depth } in visibleBranches" :key="branch.path">
             <button
@@ -131,7 +134,7 @@ async function selectFile(path: string) {
         <p v-if="loading" role="status" class="text-sm text-muted">Opening file…</p>
         <p v-else-if="error" role="alert" class="text-sm text-danger">{{ error }}</p>
         <p v-else-if="!selectedPath" class="text-sm text-faint">Choose a file to inspect it.</p>
-        <pre v-else class="max-h-[32rem] overflow-auto rounded-lg bg-ink p-3 text-xs text-paper-dim"><code>{{ content }}</code></pre>
+        <pre v-else class="max-h-[45dvh] max-w-full overflow-auto rounded-lg bg-ink p-3 text-xs text-paper-dim lg:max-h-[32rem]"><code>{{ content }}</code></pre>
       </div>
     </div>
   </section>

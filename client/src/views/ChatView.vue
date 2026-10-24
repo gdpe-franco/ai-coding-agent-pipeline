@@ -132,24 +132,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="card mx-auto flex min-h-[75vh] max-w-4xl flex-col" aria-label="Project chat">
+  <section class="card mx-auto flex h-full min-h-[24rem] max-w-5xl flex-col p-3 sm:p-5" aria-label="Project chat">
     <header class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
       <div>
         <h1 class="text-xl font-semibold">{{ chat?.title ?? "Project chat" }}</h1>
       </div>
       <div class="flex gap-2">
-        <RouterLink
-          v-if="chat"
-          class="btn-secondary text-sm"
-          :to="`/projects/${chat.project_id}`"
-        >
-          Project
-        </RouterLink>
         <RouterLink class="btn-secondary text-sm" :to="`/chats/${chatId}/history`">Run history</RouterLink>
       </div>
     </header>
 
-    <div class="flex-1 space-y-4 overflow-y-auto py-5" role="log" aria-live="polite">
+    <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-5" role="log" aria-live="polite">
       <p v-if="loading" class="text-sm text-muted" role="status">Loading chat…</p>
       <p v-else-if="messages.length === 0" class="text-sm text-muted">Start with a request for this project.</p>
       <article
@@ -162,29 +155,34 @@ onUnmounted(() => {
         <p class="whitespace-pre-wrap text-sm leading-6">{{ message.content }}</p>
         <div
           v-if="message.role === 'user' && message.run_id && latestRunMessageIds.get(message.run_id) === message.id"
-          class="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs"
+          class="mt-3 space-y-2 border-t border-line pt-3 text-xs"
         >
-          <span v-if="message.run_status" class="flex items-center gap-2 text-muted">
-            <StatusBadge :status="message.run_status" />
-            <span v-if="isActive(message.run_status)" class="inline-flex items-center gap-2" role="status">
-              <span class="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
-              {{ latestActivity(message.run_id) }}
-            </span>
-          </span>
-          <RouterLink class="text-accent hover:text-accent-hover" :to="`/runs/${message.run_id}`">
-            View details
-          </RouterLink>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <StatusBadge v-if="message.run_status" :status="message.run_status" />
+            <RouterLink class="inline-flex items-center gap-1 font-medium text-accent hover:text-accent-hover" :to="`/runs/${message.run_id}`">
+              View details <span aria-hidden="true">→</span>
+            </RouterLink>
+          </div>
+          <p
+            v-if="message.run_status && isActive(message.run_status)"
+            class="flex items-center gap-2 text-muted"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+            {{ latestActivity(message.run_id) }}
+          </p>
         </div>
       </article>
     </div>
 
     <form class="border-t border-line pt-4" @submit.prevent="send">
       <label for="chat-message" class="sr-only">Message</label>
-      <div class="flex items-end gap-3">
+      <div class="flex items-end gap-2 sm:gap-3">
         <textarea
           id="chat-message"
           v-model="draft"
-          class="input min-h-20 flex-1 resize-y"
+          class="input min-h-20 min-w-0 flex-1 resize-y"
           maxlength="8000"
           placeholder="Message this project"
           :disabled="sending || loading"
