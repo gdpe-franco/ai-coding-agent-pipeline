@@ -26,12 +26,12 @@ def _create_chat(client: TestClient, token: str, message: str, key=None):
 
 def test_health_reports_components(client: TestClient) -> None:
     response = client.get("/health")
-    assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ok"
     assert body["checks"]["database"] == "ok"
     assert body["checks"]["filesystem"] == "ok"
-    assert body["worker"] in {"idle", "alive", "unknown"}
+    assert body["worker"] in {"unavailable", "alive", "unknown"}
+    assert body["status"] == ("ok" if body["worker"] == "alive" else "degraded")
+    assert response.status_code == (200 if body["status"] == "ok" else 503)
 
 
 def test_register_login_and_me(client: TestClient) -> None:
@@ -380,7 +380,10 @@ def test_preview_url_and_preview_route(client: TestClient, settings: Settings) -
     url = client.get(
         f"/api/v1/projects/{project['id']}/preview-url", headers=auth_headers(token)
     ).json()["url"]
-    response = client.get(f"/preview/{project['preview_id']}/index.html")
+    response = client.get(
+        f"/preview/{project['preview_id']}/index.html",
+        headers={"Host": "preview.localhost"},
+    )
     assert url.endswith(f"/preview/{project['preview_id']}/")
     assert response.text == "<h1>Approved</h1>"
 
@@ -416,7 +419,7 @@ def test_rate_limiter_returns_429(tmp_path) -> None:
     )
     app = create_app(settings)
     app.state.container.rate_limiter = FakeLimiter()
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="http://localhost") as test_client:
         token = register_and_login(test_client, "limited@example.com")
         response = test_client.get("/api/v1/chats", headers=auth_headers(token))
         assert response.status_code == 429
@@ -440,6 +443,6 @@ def test_rate_limiter_fails_closed(tmp_path) -> None:
     )
     app = create_app(settings)
     app.state.container.rate_limiter = BrokenLimiter()
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="http://localhost") as test_client:
         token = register_and_login(test_client, "closed@example.com")
         assert test_client.get("/api/v1/chats", headers=auth_headers(token)).status_code == 503

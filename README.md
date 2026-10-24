@@ -48,14 +48,14 @@ stories and acceptance criteria.
 2. Build and start:
 
    ```bash
-   docker compose build
-   docker compose up -d
-   docker compose exec app alembic upgrade head
+   docker compose up -d --build
+   docker compose ps
    curl -fsS http://localhost:8000/health
    ```
 
-   `/health` reports database, filesystem, and worker-heartbeat status. The worker has no HTTP server, so its
-   liveness is reported by the app rather than a Docker HTTP healthcheck.
+   Compose waits for PostgreSQL, runs the one-shot migration service, then starts the app and worker. `/health`
+   reports database, filesystem, and worker-heartbeat status; it returns `503` until all three are ready. The
+   worker has no HTTP server, so its liveness is reported by the app.
 
 3. Open:
 
@@ -63,25 +63,51 @@ stories and acceptance criteria.
    - API `http://localhost:8000/api/v1`
    - Preview `http://preview.localhost:8000`
 
-For public HTTPS access, point two Cloudflare Tunnel hostnames to the same local app port. Set
-`PUBLIC_URL=https://app.example.com`, `FRONTEND_ORIGIN=https://app.example.com`, and
-`PREVIEW_HOST=https://preview.example.com` in the ignored `.env`, then restart Compose. Configure the local
-`cloudflared` tunnel in `~/.cloudflared/config.yml`, with its own credentials file (outside this repository):
+The app is bound to host loopback on port `8000`; PostgreSQL is bound to host loopback on `5432`. Neither is
+published to the LAN by default. `docker compose down` stops the stack but preserves volumes. Do not use
+`docker compose down -v` for routine shutdown; it removes persistent database and workspace data.
 
-```yaml
-tunnel: <TUNNEL_UUID>
-credentials-file: /path/to/<TUNNEL_UUID>.json
-ingress:
-  - hostname: app.example.com
-    service: http://localhost:8000
-  - hostname: preview.example.com
-    service: http://localhost:8000
-  - service: http_status:404
+## Public assessment tunnel
+
+The app and generated previews must use separate hostnames. The server enforces this separation; requests for
+preview files on the app hostname, or app/API routes on the preview hostname, return `404`.
+
+Keep local settings in `.env`. For a public review, copy `.env.demo.example` to ignored `.env.demo` and set the
+assigned app URL in both `PUBLIC_URL` and `NGROK_APP_URL`. Leave `FRONTEND_ORIGIN=http://localhost:5173` so Vite
+development remains allowed; the built app uses same-origin requests. `.env.demo` overrides only the public
+origins for app/worker containers.
+
+Copy `.env.tunnel.example` to ignored `.env.tunnel` and put the ngrok agent token there. The token is supplied
+only to ngrok connector containers, not the app or worker. Start the stable app URL and stack with:
+
+```bash
+docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok up -d --build
 ```
 
-Route both hostnames to the named tunnel with `cloudflared tunnel route dns <TUNNEL_NAME> <HOSTNAME>`, then
-run `cloudflared tunnel run <TUNNEL_NAME>`. Cloudflare routes only the app/preview HTTP listener. The Compose
-database port mapping is for local development and must be removed on hosts reachable from untrusted networks.
+If the ngrok account provides a second endpoint, set distinct `NGROK_PREVIEW_URL` and `PREVIEW_HOST` values in
+`.env.demo`, then start both ngrok connectors:
+
+```bash
+docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile ngrok-preview up -d
+```
+
+Otherwise start a Cloudflare Quick Tunnel for preview only:
+
+```bash
+docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile cloudflare-preview up -d cloudflared-preview
+docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile cloudflare-preview logs -f cloudflared-preview
+```
+
+Replace `PREVIEW_HOST=https://preview.invalid` in `.env.demo` with the `https://…trycloudflare.com` address
+printed in the logs, then recreate the app and worker so they load it:
+
+```bash
+docker compose --env-file .env --env-file .env.demo -f docker-compose.yml -f docker-compose.demo.yml --profile ngrok --profile cloudflare-preview up -d app worker
+```
+
+The Quick Tunnel address changes when recreated; update `PREVIEW_HOST` each time. Keep the desktop powered,
+awake, and online while reviewers need access. A locked session and blank display are fine. Stop the tunnel
+profiles when the review is over. Never publish PostgreSQL or share `.env`, `.env.demo`, or `.env.tunnel` contents.
 
 For manual development, start only PostgreSQL with `docker compose up -d db` and point the host-side
 `DATABASE_URL` at the published database port (`localhost:5432` by default). Then run from `server/`:

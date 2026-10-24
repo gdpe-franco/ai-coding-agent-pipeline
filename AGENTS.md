@@ -12,9 +12,7 @@
 From repo root:
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose exec app alembic upgrade head
+docker compose up -d --build
 curl -fsS http://localhost:8000/health
 ```
 
@@ -32,7 +30,7 @@ python -m evals.runner
 
 - Run backend checks from `server/`; `server/pyproject.toml` is the sole config (Python 3.14, line length 100, `asyncio_mode=auto`). `packages = []` installs dependencies only; the working directory makes `app` importable.
 - Ruff, pytest, and evals are the verification gate; no CI or pre-commit hooks exist. Skipped PostgreSQL tests do not satisfy it. Deterministic tests never call live models.
-- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, `app`, `worker`, with a shared `appdata` workspace volume; run migrations explicitly. Headless chat journey: `docker compose --profile e2e run --rm browser`.
+- Client: `npm ci && npm run dev` from `client/` (5173; API 8000). Docker builds the SPA and serves it through FastAPI; runtime Node is required for `node --check`. Compose has `db`, one-shot `migrate`, `app`, and `worker`, with a shared `appdata` workspace volume; migrations run before app/worker startup. Tunnel connectors are optional profiles. Headless chat journey: `docker compose --profile e2e run --rm browser`.
 
 ## Code and tests
 
@@ -62,6 +60,6 @@ python -m evals.runner
 - PostgreSQL 17; Alembic creates app tables, never `create_all`. Fixed value sets use native PG ENUMs mirrored by `StrEnum`. Before production, keep one canonical initial migration and reset local DBs when it changes; afterward use additive, data-preserving migrations.
 - LangGraph owns its checkpoint/store tables and Psycopg 3 lifecycle via `setup()`; never pass the SQLAlchemy `postgresql+asyncpg` URL to its saver.
 - Workspace: latest `data/projects/{project_id}/`, snapshots `data/artifacts/{id}/`, preview `data/preview/{project_id}/`, archive `data/archived/{project_id}/{run_id}/`. Writes use temp file + `os.replace`, restricted to plan paths. Coder emits complete files; non-plan files remain byte-for-byte unchanged.
-- Preview serves copied static files on a separate origin at `/preview/{preview_id}/`, using an unguessable capability opened in a new tab. Generated JavaScript is never executed by the server. Rate limiting is PostgreSQL-backed; trust forwarded IPs only from `TRUSTED_PROXY_CIDRS`.
-- `.env` is ignored; `.env.example` contains placeholders only. Never commit secrets; setting names are in TDD §9.3.
+- Preview serves copied static files on a separate origin at `/preview/{preview_id}/`, using an unguessable capability opened in a new tab. App/preview hostname isolation is enforced in FastAPI; generated JavaScript is never executed by the server. Rate limiting is PostgreSQL-backed; trust forwarded IPs only from exact `TRUSTED_PROXY_CIDRS` peers.
+- `.env`, `.env.demo`, and `.env.tunnel` are ignored; example env files contain placeholders only. Never commit secrets; setting names are in TDD §9.3.
 - PlantUML fences use `puml`; Graphviz-dependent diagrams start with `!pragma layout smetana` inside `@startuml`. Do not recreate `docs/plantuml.md`, add tracking/milestone docs, or introduce decision/requirement IDs into the TDD. `.vscode/settings.json` is ignored.

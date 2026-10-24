@@ -592,7 +592,10 @@ backend code. Preview runs on a different origin from the API/auth:
 
 - Development: `PREVIEW_HOST=http://preview.localhost:8000`
 - Production: `PREVIEW_HOST=https://preview.<domain>`
-- The same FastAPI process routes by Host; Cloudflare Tunnel exposes both hostnames.
+- The same FastAPI process routes by Host. A host-isolation middleware allows app/API routes only on configured
+  app hosts and capability routes only on the configured preview host; all cross-host routes and unknown hosts
+  return `404`. App and preview settings must use distinct hostnames. Loopback `/health` is allowed for container
+  health probes. The Vite preview proxy is omitted so local previews also use a separate origin.
 
 The preview URL is a bearer capability. Each project gets a random `preview_id` (UUID4) separate from the project
 UUID. `GET /api/v1/projects/{id}/preview-url` returns the URL only after an approved result exists; the preview
@@ -802,9 +805,11 @@ and Coder read through the Workspace port; the MVP does not include a manual cod
 
 ### 9.1 Assessment path
 
-Run Docker locally and expose the app and preview hostnames through Cloudflare Tunnel over HTTPS. The local
-machine supplies persistent disk and Node subprocesses without cold starts. FastAPI hosts the built SPA and API;
-the preview uses a separate hostname. Ephemeral hosting requires durable external storage before deployment.
+Run Docker locally and expose the app and preview hostnames through separate HTTPS tunnel endpoints. For the
+assessment, ngrok supplies a stable app hostname; use a second ngrok endpoint if the account allows it or a
+Cloudflare Quick Tunnel for previews. Quick Tunnel preview URLs change when restarted, requiring `PREVIEW_HOST`
+to be updated. The local machine supplies persistent disk and Node subprocesses without cold starts, so it must
+remain awake and online. Ephemeral hosting requires durable external storage before deployment.
 
 ### 9.2 Serving and topology
 
@@ -816,7 +821,7 @@ the preview uses a separate hostname. Ephemeral hosting requires durable externa
 | Preview | `/preview/{preview_id}/...`; separate hostname; no auth; capability URL. |
 | Health | `GET /health` returns `{status, checks: {database, filesystem, worker}}`; `503` when a required check fails. |
 | CORS | Explicit `FRONTEND_ORIGIN`, no wildcard in production. |
-| Trusted proxy | Forwarded client IP headers accepted only from `TRUSTED_PROXY_CIDRS`. |
+| Trusted proxy | Forwarded client IP headers accepted only from peers in `TRUSTED_PROXY_CIDRS`; forwarded host headers are not trusted. |
 
 ### 9.3 Environment variables
 
@@ -825,40 +830,50 @@ the preview uses a separate hostname. Ephemeral hosting requires durable externa
 | `APP_ENV`, `LOG_LEVEL` | `development`/`production`; `info`/`debug`. |
 | `DATABASE_URL` | SQLAlchemy async URL, e.g. `postgresql+asyncpg://app:change-me@db:5432/app`. The Worker derives a Psycopg URL for the checkpointer and store. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Compose-only database initialization; not read by the app. |
-| `SECRET_KEY` | Required JWT signing secret; never regenerated on startup. Missing/empty values fail startup with the setting name and no secret value. |
+| `SECRET_KEY` | Required JWT signing secret; never regenerated on startup. Production rejects placeholders and values shorter than 32 characters without exposing the value. |
 | `PUBLIC_URL` | Stable external app URL, e.g. `http://localhost:8000`. |
 | `FRONTEND_ORIGIN` | Allowed SPA origin, e.g. `http://localhost:5173` in Vite development. |
 | `PREVIEW_HOST` | Preview origin, e.g. `http://preview.localhost:8000`. |
+| `NGROK_APP_URL`, `NGROK_PREVIEW_URL` | Optional full HTTPS endpoint URLs used by the Compose tunnel profiles. |
+| `NGROK_AUTHTOKEN` | ngrok agent credential in ignored `.env.tunnel`, provided only to ngrok connector containers. |
 | `MAX_RUNS_PER_PROJECT` | Hard run cap `100`. The workflow has an internal maximum of three Coder generations per execution. |
 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Azure key and v1 base URL, e.g. `https://<resource>.openai.azure.com/openai/v1/`. |
 | `AZURE_OPENAI_DEPLOYMENT_PLANNER`, `AZURE_OPENAI_DEPLOYMENT_CODER`, `AZURE_OPENAI_DEPLOYMENT_REVIEWER` | Azure deployment names. |
 | `RATE_LIMIT_ENABLED` | `true`; all bucket limits use code defaults. |
-| `TRUSTED_PROXY_CIDRS` | Comma-separated trusted proxy networks; empty trusts no forwarded headers. Local tunnel example: `127.0.0.1/32,::1/128`. |
+| `TRUSTED_PROXY_CIDRS` | Comma-separated trusted proxy peer addresses; empty trusts no forwarded client-IP headers. Trust only exact connector peers, never broad private networks. |
 
 Other values are code constants: Worker poll 1s, heartbeat 15s, stale reclaim 60s, concurrency 2, Node binary
-`node`, syntax-check timeout 5s, memory caps 10 items / 4000 characters, rate-limit window 60s. Secrets and the
-production `DATABASE_URL` belong in environment settings or a gitignored `.env`. `.env.example` contains
-placeholders only; verify that no populated secrets are staged before committing.
+`node`, syntax-check timeout 5s, memory caps 10 items / 4000 characters, rate-limit window 60s. Application
+secrets and the production `DATABASE_URL` belong in environment settings or ignored `.env`; the ngrok token is
+stored separately in ignored `.env.tunnel`. Public tunnel origins belong in ignored `.env.demo`.
+`.env.example`, `.env.tunnel.example`, and `.env.demo.example` contain placeholders only; verify that no
+populated secrets are staged before committing.
 
 ### 9.4 Docker and startup
 
-One image builds Vite assets in a Node stage and runs the Python/FastAPI runtime. Compose runs PostgreSQL 17 with a
-persistent `pgdata` volume and the app with a persistent `appdata` volume for generated files, previews, and
-archives.
+One image builds Vite assets in a Node stage and runs the Python/FastAPI runtime. Frontend package manifests are
+copied before source files so ordinary source edits can reuse the `npm ci` layer. Compose runs PostgreSQL 17 with
+a persistent `pgdata` volume and the app with a persistent `appdata` volume for generated files, previews, and
+archives. App and worker share one image. Host ports bind only to `127.0.0.1`; the database is never a tunnel
+target.
 
 - `app`: gunicorn + uvicorn workers, serves the frontend and API, enqueues runs.
 - `worker`: same image, `python -m app.worker`, claims and executes runs.
+- `migrate`: one-shot `alembic upgrade head`, after PostgreSQL is healthy and before app/worker startup.
+- Optional `ngrok`, `ngrok-preview`, and `cloudflared-preview` profiles expose only the app listener. ngrok gets
+  its token from ignored `.env.tunnel`; Quick Tunnel needs no credential.
 - Runtime Node is required for `node --check`. Do not create application tables with `create_all`.
+- Long-running services use `restart: unless-stopped`; `docker compose down` preserves named volumes.
+  `docker compose down -v` deletes local database and workspace data.
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose exec app alembic upgrade head
+docker compose up -d --build
 curl -fsS http://localhost:8000/health
 ```
 
-The Worker waits for PostgreSQL and application migrations, initializes the checkpointer and store with
-`setup()` (idempotent), then starts claiming runs. Manual development uses PostgreSQL 17 and the
+Compose waits for PostgreSQL, runs migrations to completion, then starts the app and worker. `/health` returns
+`503` until database, filesystem, and a fresh worker heartbeat are available. The Worker initializes the
+checkpointer and store with `setup()` (idempotent), then starts claiming runs. Manual development uses PostgreSQL 17 and the
 same `DATABASE_URL`, starts FastAPI with `uvicorn app.main:create_app --factory --reload` from `server/`, starts
 the worker with `python -m app.worker`, and runs Vite from `client/`.
 

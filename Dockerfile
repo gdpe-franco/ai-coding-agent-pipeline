@@ -1,7 +1,9 @@
 FROM node:22-slim AS frontend
 WORKDIR /src
-COPY . /src
-RUN cd /src/client && npm ci && npm run build \
+COPY client/package.json client/package-lock.json /src/client/
+RUN cd /src/client && npm ci
+COPY client/ /src/client/
+RUN cd /src/client && npm run build \
     && mkdir -p /client && cp -a dist /client/dist
 
 FROM python:3.14-slim AS runtime

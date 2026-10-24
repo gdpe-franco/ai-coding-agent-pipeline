@@ -10,6 +10,8 @@ env/
 .env
 .env.local
 .env.*.local
+.env.tunnel
+.env.demo
 
 # Runtime data (SQLite + file tree)
 data/

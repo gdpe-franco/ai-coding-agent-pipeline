@@ -1,0 +1,14 @@
+services:
+  app:
+    environment:
+      APP_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env.demo}
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env.demo}
+      PREVIEW_HOST: ${PREVIEW_HOST:?Set PREVIEW_HOST in .env.demo}
+
+  worker:
+    environment:
+      APP_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env.demo}
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env.demo}
+      PREVIEW_HOST: ${PREVIEW_HOST:?Set PREVIEW_HOST in .env.demo}

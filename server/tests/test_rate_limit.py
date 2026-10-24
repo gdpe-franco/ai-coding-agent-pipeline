@@ -144,7 +144,11 @@ def test_forwarded_ip_is_used_only_from_a_trusted_proxy(tmp_path) -> None:
         app.state.container.rate_limiter.consume = allow
         with TestClient(app, client=(peer, 50000)) as client:
             response = client.get(
-                "/api/v1/projects", headers={"X-Forwarded-For": "198.51.100.10, 203.0.113.2"}
+                "/api/v1/projects",
+                headers={
+                    "Host": "localhost",
+                    "X-Forwarded-For": "198.51.100.10, 203.0.113.2",
+                },
             )
             assert response.status_code == 401
 

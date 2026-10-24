@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +53,29 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("SECRET_KEY must not be empty")
         return value
+
+    @model_validator(mode="after")
+    def preview_uses_a_separate_hostname(self) -> Settings:
+        def hostname(url: str) -> str:
+            try:
+                parsed = urlsplit(url)
+                result = parsed.hostname
+            except ValueError as exc:
+                raise ValueError("Application URLs must be valid HTTP(S) origins") from exc
+            if parsed.scheme not in {"http", "https"} or not result:
+                raise ValueError("Application URLs must be valid HTTP(S) origins")
+            return result.rstrip(".").lower()
+
+        app_hosts = {hostname(self.public_url), hostname(self.frontend_origin)}
+        if hostname(self.preview_host) in app_hosts:
+            raise ValueError("PREVIEW_HOST must use a hostname separate from the app origins")
+        if self.app_env.casefold() in {"prod", "production"}:
+            secret = self.secret_key.strip()
+            if len(secret) < 32 or secret.casefold() == "change-me-generate-a-strong-value":
+                raise ValueError(
+                    "SECRET_KEY must be at least 32 characters and non-placeholder in production"
+                )
+        return self
 
     @property
     def psycopg_url(self) -> str:

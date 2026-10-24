@@ -28,18 +28,20 @@ async def health(request: Request, response: Response) -> HealthRead:
     except OSError:
         filesystem = "unavailable"
 
-    worker = "idle"
+    worker = "unavailable"
     try:
         async with container.session_factory() as session:
             from app.infrastructure.persistence.repository import SqlAlchemyRepository
 
             latest = await SqlAlchemyRepository(session).latest_heartbeat()
-        if latest is not None and datetime.now(UTC) - latest < timedelta(seconds=30):
+        if latest is not None and datetime.now(UTC) - latest < timedelta(
+            seconds=container.settings.worker_stale_seconds
+        ):
             worker = "alive"
     except Exception:  # noqa: BLE001
         worker = "unknown"
 
-    status = "ok" if database == "ok" and filesystem == "ok" else "degraded"
+    status = "ok" if database == "ok" and filesystem == "ok" and worker == "alive" else "degraded"
     if status != "ok":
         response.status_code = 503
     return HealthRead(

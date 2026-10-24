@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -10,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.infrastructure.container import Container
 from app.interfaces.api import chats, health, preview, projects, runs
 from app.interfaces.dependencies import build_fastapi_users
+from app.interfaces.middleware.host_isolation import HostIsolationMiddleware
 from app.interfaces.middleware.rate_limit import RateLimitMiddleware
 from app.interfaces.schemas.users import UserCreate, UserRead, UserUpdate
 from app.settings import Settings
@@ -35,6 +37,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(RateLimitMiddleware, container=container)
+
+    app_hosts = {
+        host.rstrip(".").lower()
+        for host in (
+            urlsplit(settings.public_url).hostname,
+            urlsplit(settings.frontend_origin).hostname,
+        )
+        if host
+    }
+    app.add_middleware(
+        HostIsolationMiddleware,
+        app_hosts=app_hosts,
+        preview_host=(urlsplit(settings.preview_host).hostname or "").rstrip(".").lower(),
+    )
 
     fastapi_users, auth_backend = build_fastapi_users(settings)
     app.include_router(

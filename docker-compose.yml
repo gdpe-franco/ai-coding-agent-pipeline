@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -9,15 +10,27 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       # Development convenience; production must not publish the database port.
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: ai-coding-agent-pipeline:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+
   app:
+    image: ai-coding-agent-pipeline:local
     build: .
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -25,14 +38,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - appdata:/app/data
 
   worker:
-    build: .
+    image: ai-coding-agent-pipeline:local
     command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
     stop_grace_period: 20s
     healthcheck:
       disable: true
@@ -43,8 +59,42 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - appdata:/app/data
+
+  ngrok:
+    image: ngrok/ngrok@sha256:ff3b5c3674432d14a786349908b7bdf28ee56c25662637afcbe7180d471993ef
+    profiles: [ngrok]
+    restart: unless-stopped
+    command: ["http", "app:8000", "--url=${NGROK_APP_URL:-}", "--log=stdout"]
+    env_file:
+      - path: .env.tunnel
+        required: false
+    depends_on:
+      app:
+        condition: service_healthy
+
+  ngrok-preview:
+    image: ngrok/ngrok@sha256:ff3b5c3674432d14a786349908b7bdf28ee56c25662637afcbe7180d471993ef
+    profiles: [ngrok-preview]
+    restart: unless-stopped
+    command: ["http", "app:8000", "--url=${NGROK_PREVIEW_URL:-}", "--log=stdout"]
+    env_file:
+      - path: .env.tunnel
+        required: false
+    depends_on:
+      app:
+        condition: service_healthy
+
+  cloudflared-preview:
+    image: cloudflare/cloudflared@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    profiles: [cloudflare-preview]
+    command: ["tunnel", "--no-autoupdate", "--url", "http://app:8000"]
+    depends_on:
+      app:
+        condition: service_healthy
 
   browser:
     image: mcr.microsoft.com/playwright:v1.55.1-noble
@@ -53,7 +103,7 @@ services:
     working_dir: /work
     command: ["sh", "-lc", "npm ci && npm run test:e2e"]
     environment:
-      PLAYWRIGHT_BASE_URL: http://127.0.0.1:8000
+      PLAYWRIGHT_BASE_URL: http://localhost:8000
     volumes:
       - ./client:/work
     depends_on:
