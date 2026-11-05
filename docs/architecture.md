@@ -296,7 +296,8 @@ changes require compatibility care.
 `agent_schemas.py` validates the structured contracts with Pydantic `extra="forbid"`. An invalid Planner response
 fails closed as a model error. Scope classification reuses the Planner call: stopped requests still incur Planner
 tokens but avoid Coder and Reviewer calls. `RunProcessor` finalizes with a fixed reply, `failed` status and
-`request_<decision>` reason in the run event. It does not modify files, artifacts, previews, or project memory.
+`request_<decision>` as the run error and event tag; the event's `reason` is the Planner decision itself.
+It does not modify files, artifacts, previews, or project memory.
 Planner usage is included in the event. A stopped continuation also closes the run while preserving prior work.
 
 Allowed file types are `html`, `css`, `js`, `md`, `json`, `svg`, `png` and `ico`. Paths use ASCII letters/digits,

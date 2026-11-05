@@ -1,8 +1,8 @@
 # AI Multi-Agent Coding Platform
 
 Esta plataforma permite crear pequeñas aplicaciones web a partir de una descripción. Desde un chat, el usuario
-plantea lo que necesita y pide cambios sobre el mismo proyecto. Tres agentes se encargan de planear los archivos,
-generar el código y revisar el resultado.
+plantea lo que necesita y pide cambios sobre el mismo proyecto. Antes de generar código, el Planner clasifica la
+solicitud; las preguntas generales y las peticiones para revelar instrucciones internas se detienen.
 
 La demo trabaja con aplicaciones estáticas en HTML, CSS y JavaScript e incluye cuentas de usuario,
 conversaciones persistentes e historial de ejecuciones.
@@ -11,9 +11,14 @@ conversaciones persistentes e historial de ejecuciones.
 [Diseño técnico — English](docs/architecture.md) ·
 [Swagger local](http://localhost:8000/docs)
 
+![Espacio de chats con datos de ejemplo](docs/chats-home.png)
+
+*Espacio de trabajo de chats con datos de ejemplo.*
+
 ## Funcionalidades principales
 
 - Solicitudes en lenguaje natural y conversaciones que conservan el contexto de cada proyecto.
+- Clasificación de alcance y detección de solicitudes para revelar instrucciones internas antes de generar archivos.
 - Plan de trabajo, generación de archivos y revisión con observaciones para corregir el código.
 - Hasta tres generaciones del Coder por ejecución, incluida la primera; el límite es configurable.
 - Historial con estados, validaciones, archivos guardados y consumo de tokens cuando Azure lo informa.
@@ -26,31 +31,37 @@ conversaciones persistentes e historial de ejecuciones.
 ```mermaid
 flowchart LR
     usuario[Usuario] --> chat["Chat web: ticket o cambio"]
-    chat --> planner[Planner]
-    planner -->|Plan de archivos| coder[Coder]
+    chat --> planner["Planner: clasifica y planifica"]
+    planner -->|Solicitud de aplicación| coder[Coder]
+    planner -->|Fuera de alcance, duda o petición interna| detener[Responder sin generar]
     coder -->|Código y validaciones| reviewer[Reviewer]
     reviewer -->|Rechazo y observaciones, si quedan intentos| coder
     reviewer -->|Aprobación, escalación o límite alcanzado| resultado[Resultado]
+    detener --> resultado
     resultado --> chat
     classDef user fill:#2a1a18,stroke:#d9776e,color:#f0f0ee,stroke-width:2px
     classDef agent fill:#171716,stroke:#6f3d38,color:#f0f0ee
     classDef outcome fill:#152328,stroke:#35515a,color:#f0f0ee
     class usuario user
     class chat,planner,coder,reviewer agent
-    class resultado outcome
+    class resultado,detener outcome
 ```
 
 1. Al enviar el primer mensaje en **Nuevo chat**, se crea un proyecto. Las siguientes solicitudes de ese chat
    trabajan sobre sus archivos.
-2. El **Planner** propone entre uno y ocho archivos. El **Coder** escribe su contenido completo a partir del plan
-   y de los archivos que ya existen.
-3. Se revisa que los archivos estén presentes y que el JavaScript externo tenga sintaxis válida. Después, el
+2. El **Planner** clasifica la solicitud. Sólo si identifica un cambio de aplicación propone entre uno y ocho
+   archivos. Si la solicitud está fuera de alcance, necesita aclaración o infringe la política, LangGraph
+   termina sin llamar al Coder ni al Reviewer y la aplicación devuelve una respuesta predefinida. El **Coder**
+   escribe los archivos completos a partir del plan y de los archivos existentes.
+3. Se comprueba que los archivos estén presentes y que el JavaScript externo tenga sintaxis válida. Después, el
    **Reviewer** compara el código con la solicitud y señala los problemas que encuentra.
 4. Si aprueba el resultado, se publica la vista previa. Si pide correcciones, el Coder recibe sus observaciones
    y vuelve a intentarlo. Al llegar al límite, se conserva el trabajo y se pide orientación al usuario.
 
-Cada solicitud se registra como un **run**. Si necesita una aclaración, el usuario puede continuar ese mismo run
-en una nueva **ejecución**, que vuelve a pasar por los tres agentes.
+Cada solicitud se registra como un **run**. Si el Reviewer escala el trabajo o se agotan los intentos, el run queda
+`awaiting_user`; el usuario puede continuarlo con orientación en una nueva **ejecución**, que vuelve a pasar por el
+Planner. Consulta el [flujo de LangGraph y los estados del run](docs/architecture.md#5-agent-workflow-contracts-and-context)
+para ver los detalles.
 
 ## Arquitectura general
 
@@ -286,6 +297,3 @@ trabajo del equipo; dividirlo tendría sentido si cambian las responsabilidades 
 - [Pruebas backend](server/tests/), [evals deterministas](server/evals/runner.py) y
   [journey de navegador](client/e2e/chat.spec.ts).
 - [Configuración de ejemplo](.env.example), [Compose](docker-compose.yml) y [arranque de demo](demo-up.sh).
-
-La revisión se basó en el código y las pruebas disponibles. Queda pendiente revisar el PDF original y las reglas
-del ejemplo de cupones. El PRD de `tasks/` es un borrador local, excluido de Git.
