@@ -199,8 +199,11 @@ Credentials, SDK objects and deployment selection stay in infrastructure and ope
 %%{init: {"theme":"base","themeVariables":{"background":"#101010","primaryColor":"#171716","primaryTextColor":"#f0f0ee","primaryBorderColor":"#6f3d38","lineColor":"#a4a2a3","textColor":"#f0f0ee","mainBkg":"#171716","actorBkg":"#2a1a18","actorBorder":"#6f3d38","actorTextColor":"#f0f0ee","signalColor":"#a4a2a3","signalTextColor":"#f0f0ee","labelBoxBkgColor":"#1f1e1c","labelBoxBorderColor":"#35515a","labelTextColor":"#f0f0ee","loopTextColor":"#f0f0ee","noteBkgColor":"#152328","noteTextColor":"#f0f0ee","noteBorderColor":"#35515a"}}}%%
 flowchart TD
     start([Start]) --> context[Load project memory and chat history]
-    context --> plan[Planner produces validated file plan]
-    plan --> generate[Coder generates every planned file]
+    context --> plan[Planner classifies request and creates plan]
+    plan --> scope{Decision?}
+    scope -->|build| generate[Coder generates every planned file]
+    scope -->|other decision| stopped[RunProcessor finalizes with fixed reply]
+    stopped --> rejected([Failed with reason])
     generate --> review[Static checks, then Reviewer]
     review --> approved{Approved and checks pass?}
     approved -->|Yes| publish[Publish preview and save confirmed memory]
@@ -217,15 +220,17 @@ flowchart TD
     classDef decision fill:#2a2113,stroke:#5d4a26,color:#f0f0ee
     classDef success fill:#16241a,stroke:#34523c,color:#f0f0ee
     classDef handoff fill:#152328,stroke:#35515a,color:#f0f0ee
-    class start,context,plan,generate,review,feedback process
-    class approved,escalate,exhausted decision
+    classDef error fill:#2b1716,stroke:#60332f,color:#f0f0ee
+    class start,context,plan,generate,review,feedback,stopped process
+    class scope,approved,escalate,exhausted decision
     class publish,completed success
     class handoff,handoffExhausted,waiting handoff
+    class rejected error
 ```
 
-`graph.py` implements `START → planner → coder → reviewer`, with Reviewer routing back to Coder or ending the
-graph. Processing exceptions are handled by `RunProcessor` and recorded as failures.
-The application writes the final `chat_reply`.
+Planner routes only `build` to Coder; Reviewer routes approved work to completion, rejected work back to Coder,
+and escalation or exhaustion to handoff. Other Planner decisions end the graph for application-owned finalization.
+`RunProcessor` handles finalization and records processing exceptions as failures.
 
 `MAX_CODER_GENERATIONS=3` means **three total generations**, including the initial attempt; minimum one. Each
 generation invokes Coder once per planned file. Approval exits early. The counter is `coder_generations` in graph
@@ -244,6 +249,7 @@ stateDiagram-v2
     running --> completed: Approval, checks, publication and finalization
     running --> awaiting_user: Exhaustion or escalation
     running --> failed: Unrecoverable processing error
+    running --> failed: Scope stop with reason code
     awaiting_user --> pending: Guidance, same run and new execution
     awaiting_user --> failed: User closes handoff
     completed --> [*]
@@ -268,27 +274,30 @@ stateDiagram-v2
 | `running` | Claimed and processing, with heartbeat. |
 | `awaiting_user` | Unapproved work needs guidance. Not claimable; blocks ordinary new requests in its chat. |
 | `completed` | Approved output was processed through publication/finalization. |
-| `failed` | Processing failed, or the user explicitly closed a handoff. The closing event distinguishes abandonment. |
+| `failed` | Processing failed, scope policy stopped the request, or the user closed a handoff. The event reason identifies the outcome. |
 
 Continuation requires nonblank guidance, records another user message, sets `pending`, assigns `execution_id`,
 clears locks/current reply/error and starts at Planner with a fresh generation budget. It preserves run/chat/project
 identity and prior artifacts/events. Model failures do not offer continuation through that endpoint, which accepts
 only `awaiting_user`.
 
-`GraphState` is a `TypedDict` containing IDs, message/guidance, memory, plan/code/feedback/checks, generation count,
-approval/handoff/reason, aggregate usage and error. Runtime validation applies to individual agent outputs and
-domain/path rules. Checkpoint-shape changes require compatibility care.
+`GraphState` is a `TypedDict` containing IDs, request context, scope decision, plan/code/review state, generation
+count, outcome, usage and error. Agent outputs and file paths are validated at their boundaries. Checkpoint-shape
+changes require compatibility care.
 
 ### 5.3 Agent contracts
 
 | Agent | Inputs | Output and checks |
 |---|---|---|
-| Planner | Request, latest guidance, last 20 chat messages, project summary memory. | `PlannerResponse`: summary (1–2000 chars), 1–8 steps, optional title. Step name ≤120, relative path ≤300, description ≤1000, allowlisted type. |
+| Planner | Request, latest guidance, last 20 chat messages, project summary memory. | `PlannerResponse`: `build`, `out_of_scope`, `clarification_needed`, or `policy_violation`. `build` requires 1–8 planned files and may suggest a title; other decisions require no files and a null title. |
 | Coder | Current step, plan summary/description, all readable existing text files, memory, guidance, previous review only on revisions. | `CoderResponse`: exact requested `file_path`, complete nonempty text. Null bytes are stripped. Writes limited to the current plan; checksum computed by the application. |
 | Reviewer | Original request, latest guidance, plan, generated files and other readable project files, check report and memory. | `ReviewerResponse`: `approve` / `reject` / `escalate`, summary ≤2000, up to 20 issues (message ≤1000 and nullable file path). Approval is changed to rejection if static checks fail. |
 
-`agent_schemas.py` uses Pydantic `extra="forbid"` and exports the provider JSON Schemas. The graph parses and validates
-each response. Prompts live in `application/prompts.py`; executions currently use the deployed code's instructions.
+`agent_schemas.py` validates the structured contracts with Pydantic `extra="forbid"`. An invalid Planner response
+fails closed as a model error. Scope classification reuses the Planner call: stopped requests still incur Planner
+tokens but avoid Coder and Reviewer calls. `RunProcessor` finalizes with a fixed reply, `failed` status and
+`request_<decision>` reason in the run event. It does not modify files, artifacts, previews, or project memory.
+Planner usage is included in the event. A stopped continuation also closes the run while preserving prior work.
 
 Allowed file types are `html`, `css`, `js`, `md`, `json`, `svg`, `png` and `ico`. Paths use ASCII letters/digits,
 underscore, hyphen, dot and forward slash; absolute paths, backslashes and any `..` substring are rejected.
@@ -437,6 +446,12 @@ The latest approved project is served at `/preview/{preview_id}/`, using a stabl
 Anyone with that URL can view it. The owner-scoped API exposes the link after `preview_ready`; the UI opens a
 new tab with `noopener noreferrer`. Responses set `noindex` and `Referrer-Policy: no-referrer`. Generated scripts
 retain browser network access, so generated files must stay free of secrets.
+
+### 7.4 Model instruction boundaries
+
+All three agent prompts treat user messages, history, guidance, memory, and project files as untrusted data.
+Prompt instructions reduce injection risk but are not a security boundary; authorization, secrets, file paths, and
+publication remain controlled by application code.
 
 ## 8. Persistence, queue and workspace
 
@@ -615,8 +630,8 @@ installs dependencies; run backend commands from `server/` so `app` is importabl
 
 | Level | Evidence |
 |---|---|
-| Pure policy and prompt tests | Status rules, budget, approval guard, prompt inputs, usage/log formatting. |
-| Fake-port graph tests | Feedback delivery, early approval, exhaustion, escalation, invalid outputs, multi-file usage aggregation. |
+| Pure policy and prompt tests | Status rules, budget, approval guard, prompt inputs and trust-boundary text, usage/log formatting. |
+| Fake-port graph tests | Scope routing/no generation, feedback delivery, early approval, exhaustion, escalation, invalid outputs, multi-file usage aggregation. |
 | Adapter tests | Azure request shape/fallback and token metadata with fake responses; real filesystem writes, paths and Node syntax checks. |
 | PostgreSQL/API tests | Atomic submissions, idempotency, ownership, active-run/run-cap guards, finalization, snapshots, memory and rate-limit persistence. |
 | Worker tests | Two concurrent fake processors, shutdown drain/cancel, release behavior; queue claim/reclaim also has persistence tests. |
@@ -652,9 +667,10 @@ The Dockerfile also executes the client production build. Host-side development 
 
 ### 11.2 Evaluation harness
 
-`server/evals/runner.py` exercises five scripted scenarios: coupon workflow, Flappy Bird revision, file preservation,
-escalation and malformed Planner output, plus missing credentials. Its `fake_port_policy` metrics cover workflow
-behavior and checksums. `real_provider_quality` currently reports `blocked` with sample size zero.
+`server/evals/runner.py` exercises fake-port scenarios for app generation, revision, file preservation, handoff,
+malformed Planner output, out-of-scope and Spanish prompt-injection requests, and legitimate quoted injection
+content. These verify routing contracts, not model classification accuracy. `real_provider_quality` remains blocked
+until live-model evaluation is run.
 
 Model-quality evaluation still needs exact ticket rules, repeated live runs, functional checks and recorded
 deployment/prompt configuration. The original assessment PDF and its coupon rules remain unavailable locally.
@@ -671,7 +687,7 @@ deployment/prompt configuration. The original assessment PDF and its coupon rule
 | Local volumes and tunnel hosting | No HA/backup automation; preview URLs may change, logs are container-scoped. |
 | Token-based rate-limit identity and trusted proxy configuration | A new token can create a new identity bucket; connector-IP grouping can affect public signup/requests. |
 | Email delivery | Reset/verification routes need token-delivery integration for a complete recovery workflow. |
-| Provider/prompt evaluation | Role-level model selection still needs comparative quality, latency and cost measurements. |
+| Provider/prompt evaluation | Deployment comparisons and live scope/injection classification remain unevaluated. Fake-port tests verify routing, not model judgment or universal injection resistance. |
 
 ## 13. Limits and open decisions
 

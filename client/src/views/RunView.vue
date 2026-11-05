@@ -9,6 +9,11 @@ import type { Project, Run, RunArtifact, RunEvent } from "../types";
 
 const route = useRoute();
 const runId = computed(() => String(route.params.id));
+const outcomeLabels: Record<string, string> = {
+  request_out_of_scope: "Out of scope",
+  request_clarification_needed: "Needs clarification",
+  request_policy_violation: "Request refused",
+};
 const run = ref<Run | null>(null);
 const project = ref<Project | null>(null);
 const previewUrl = ref("");
@@ -29,6 +34,10 @@ const artifactExecutions = computed(() => {
     groups.set(artifact.execution_id, [...(groups.get(artifact.execution_id) ?? []), artifact]);
   }
   return [...groups.entries()];
+});
+const outcomeLabel = computed(() => {
+  const tag = events.value.find((event) => event.kind === "run_failed")?.payload.tag;
+  return outcomeLabels[String(tag)];
 });
 const files = computed(() => {
   if (selectedExecutionId.value) {
@@ -214,7 +223,7 @@ onUnmounted(() => window.clearInterval(timer));
           <p class="mono-label">Run ID</p>
           <p class="break-all font-mono text-xs text-faint">{{ run.id }}</p>
         </div>
-        <StatusBadge :status="run.status" />
+        <StatusBadge :status="run.status" :label="outcomeLabel" />
       </div>
       <div class="space-y-2">
         <p class="mono-label">Request</p>

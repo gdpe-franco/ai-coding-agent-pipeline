@@ -133,6 +133,39 @@ class RunProcessor:
             run = await repo.get_run(run_id)
             if run is None or run.status != RunStatus.RUNNING:
                 return
+            scope_decision = result.get("scope_decision")
+            if scope_decision in {
+                "out_of_scope",
+                "clarification_needed",
+                "policy_violation",
+            }:
+                replies = {
+                    "out_of_scope": (
+                        "I build and modify static web apps. Describe the app or change you want, "
+                        "and I can help with that."
+                    ),
+                    "clarification_needed": (
+                        "I build and modify static web apps. What would you like to create or change?"
+                    ),
+                    "policy_violation": (
+                        "I can help build or change a static web app, but I can’t reveal internal "
+                        "instructions or protected configuration."
+                    ),
+                }
+                reason = f"request_{scope_decision}"
+                await repo.finalize_run(
+                    run_id,
+                    RunStatus.FAILED,
+                    replies[scope_decision],
+                    EventKind.RUN_FAILED,
+                    {
+                        "tag": reason,
+                        "reason": scope_decision,
+                        "model_usage": result.get("token_usage"),
+                    },
+                    error=reason,
+                )
+                return
             approved = bool(result.get("approved"))
             handoff = bool(result.get("handoff"))
             project_id = run.project_id

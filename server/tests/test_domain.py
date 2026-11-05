@@ -65,7 +65,41 @@ def test_check_report_ok_requires_both_stages(
 
 
 def test_planner_schema_accepts_valid_step() -> None:
-    assert PlannerResponse(summary="ok", steps=[PLANNER_STEP]).steps[0].file_path == "index.html"
+    parsed = PlannerResponse(
+        decision="build",
+        summary="ok",
+        steps=[PLANNER_STEP],
+        suggested_project_title=None,
+    )
+    assert parsed.steps[0].file_path == "index.html"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(
+            {
+                "decision": "build",
+                "summary": "missing files",
+                "steps": [],
+                "suggested_project_title": None,
+            },
+            id="build-without-files",
+        ),
+        pytest.param(
+            {
+                "decision": "out_of_scope",
+                "summary": "has files",
+                "steps": [PLANNER_STEP],
+                "suggested_project_title": None,
+            },
+            id="stopped-with-files",
+        ),
+    ],
+)
+def test_planner_schema_enforces_decision_contract(data: dict) -> None:
+    with pytest.raises(ValueError):
+        PlannerResponse.model_validate(data)
 
 
 @pytest.mark.parametrize(
@@ -77,7 +111,12 @@ def test_planner_schema_accepts_valid_step() -> None:
 )
 def test_planner_schema_rejects_invalid_steps(steps: list[dict[str, str]]) -> None:
     with pytest.raises(ValueError):
-        PlannerResponse(summary="ok", steps=steps)
+        PlannerResponse(
+            decision="build",
+            summary="ok",
+            steps=steps,
+            suggested_project_title=None,
+        )
 
 
 def test_coder_schema_rejects_empty_content() -> None:

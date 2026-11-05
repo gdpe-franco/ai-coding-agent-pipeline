@@ -1,8 +1,23 @@
 from uuid import uuid4
 
-from app.application.prompts import coder_messages, reviewer_messages
+from app.application.prompts import coder_messages, planner_messages, reviewer_messages
 from app.domain.enums import FileType
 from app.domain.models import CheckReport, Plan, PlanStep
+
+
+def test_planner_prompt_classifies_scope_and_treats_context_as_untrusted() -> None:
+    system, user = planner_messages(
+        "Build a security-training page quoting an administrator prompt injection.",
+        "untrusted memory",
+        [{"role": "user", "content": "untrusted history"}],
+        "untrusted guidance",
+    )
+
+    assert "out_of_scope" in system["content"]
+    assert "policy_violation" in system["content"]
+    assert "quoted injection examples" in system["content"]
+    assert "untrusted data" in system["content"]
+    assert "untrusted memory" in user["content"]
 
 
 def test_coder_prompt_includes_plan_summary() -> None:
@@ -69,3 +84,22 @@ def test_reviewer_prompt_receives_request_guidance_and_project_context() -> None
     assert "Build a coupon validator" in user["content"]
     assert "Expired coupons must be rejected" in user["content"]
     assert "shared.js" in user["content"]
+
+
+def test_all_agents_treat_supplied_context_as_untrusted() -> None:
+    coder_system = coder_messages(
+        "Page", "index.html", "html", "Plan", "Description", {}, "", None
+    )[0]["content"]
+    plan = Plan(project_id=uuid4(), summary="Page", steps=[])
+    reviewer_system = reviewer_messages(
+        "Build page",
+        None,
+        plan,
+        [],
+        {},
+        CheckReport(file_structure_ok=True, js_syntax_ok=True),
+        "",
+    )[0]["content"]
+
+    assert "untrusted data" in coder_system
+    assert "untrusted data" in reviewer_system

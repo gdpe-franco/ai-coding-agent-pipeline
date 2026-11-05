@@ -25,11 +25,22 @@ class PlannerStep(StrictModel):
 
 
 class PlannerResponse(StrictModel):
+    decision: Literal["build", "out_of_scope", "clarification_needed", "policy_violation"]
     summary: str = Field(min_length=1, max_length=2000)
-    steps: list[PlannerStep] = Field(min_length=1, max_length=8)
+    steps: list[PlannerStep] = Field(max_length=8)
     suggested_project_title: str | None = Field(
         ..., description="A concise 2–6 word project name in the user's language, or null."
     )
+
+    @model_validator(mode="after")
+    def validate_decision(self):
+        if self.decision == "build" and not self.steps:
+            raise ValueError("build decisions require at least one planned file")
+        if self.decision != "build" and self.steps:
+            raise ValueError("non-build decisions must not include planned files")
+        if self.decision != "build" and self.suggested_project_title is not None:
+            raise ValueError("non-build decisions must not suggest a project title")
+        return self
 
     @model_validator(mode="before")
     @classmethod

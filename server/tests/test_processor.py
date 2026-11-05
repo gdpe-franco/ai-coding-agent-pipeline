@@ -6,7 +6,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from app.application.processor import RunProcessor
-from app.domain.enums import EventKind, RunStatus
+from app.domain.enums import EventKind, FileType, RunStatus
 from app.domain.errors import ModelError
 from app.infrastructure.persistence.models import Artifact, ChatMessage, Project, Run, RunEvent
 from app.infrastructure.persistence.repository import SqlAlchemyRepository
@@ -199,6 +199,82 @@ async def test_processor_reports_exhausted_generation_budget(session_factory, re
     assert "all 3 automatic code-generation attempts" in saved.chat_reply
     assert handoff.payload["reason"] == "generation_budget_exhausted"
     assert handoff.payload["model_usage"]["usage"]["total_tokens"] == 420
+
+
+async def test_processor_stops_out_of_scope_without_touching_project_or_memory(
+    session_factory, repo_factory
+) -> None:
+    _chat, project, running = await _running_run(session_factory, "out-of-scope@example.com")
+    previous_code = [
+        {
+            "file_path": "index.html",
+            "content": "<h1>previous work</h1>",
+            "checksum": "a" * 64,
+            "file_type": "html",
+        }
+    ]
+    async with repo_factory() as repo:
+        await repo.update_run(
+            running.id,
+            latest_code=previous_code,
+            plan={"summary": "Previous plan", "steps": []},
+        )
+        artifact = await repo.add_artifact(
+            running.id,
+            running.execution_id,
+            "index.html",
+            FileType.HTML,
+            "a" * 64,
+        )
+        await repo.commit()
+    async with session_factory() as session:
+        saved_project = await session.get(Project, project.id)
+        saved_project.preview_ready = True
+        await session.commit()
+    workspace = FakeWorkspace()
+    workspace.files = {"index.html": "<h1>previous work</h1>"}
+    workspace.artifacts[(str(artifact.id), "index.html")] = "<h1>previous work</h1>"
+    memory = FakeMemory()
+    usage = {"model_responses": 1, "usage": {"total_tokens": 12}}
+    processor = RunProcessor(
+        repo_factory,
+        FakeGraph({"scope_decision": "out_of_scope", "token_usage": usage}),
+        workspace,
+        memory,
+        SimpleNamespace(worker_heartbeat_seconds=1),
+        "worker-a",
+    )
+
+    await processor.process(running)
+
+    async with session_factory() as session:
+        saved = await session.get(Run, running.id)
+        saved_project = await session.get(Project, project.id)
+        failed = (
+            await session.execute(
+                select(RunEvent).where(
+                    RunEvent.run_id == running.id, RunEvent.kind == EventKind.RUN_FAILED.value
+                )
+            )
+        ).scalar_one()
+        artifacts = list(
+            (await session.execute(select(Artifact).where(Artifact.run_id == running.id))).scalars()
+        )
+    assert saved.status == RunStatus.FAILED
+    assert saved.error == "request_out_of_scope"
+    assert "static web apps" in saved.chat_reply
+    assert failed.payload == {
+        "tag": "request_out_of_scope",
+        "reason": "out_of_scope",
+        "model_usage": usage,
+    }
+    assert saved_project.preview_ready is True
+    assert saved.plan == {"summary": "Previous plan", "steps": []}
+    assert saved.latest_code == previous_code
+    assert workspace.files == {"index.html": "<h1>previous work</h1>"}
+    assert [item.id for item in artifacts] == [artifact.id]
+    assert workspace.artifacts == {(str(artifact.id), "index.html"): "<h1>previous work</h1>"}
+    assert not hasattr(memory, "saved")
 
 
 async def test_continuation_keeps_artifacts_for_each_execution(

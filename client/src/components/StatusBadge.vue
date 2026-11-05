@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { RunStatus } from "../types";
 
-const props = defineProps<{ status: RunStatus | string }>();
+const props = defineProps<{ status: RunStatus | string; label?: string }>();
 
 const styles: Record<string, string> = {
   pending: "border-line-strong bg-raised text-muted",
@@ -21,7 +21,7 @@ const labels: Record<string, string> = {
 };
 
 const classes = computed(() => styles[props.status] ?? "border-line-strong bg-raised text-muted");
-const label = computed(() => labels[props.status] ?? props.status);
+const label = computed(() => props.label ?? labels[props.status] ?? props.status);
 </script>
 
 <template>

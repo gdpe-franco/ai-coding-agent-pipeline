@@ -45,6 +45,7 @@ class GraphState(TypedDict, total=False):
     execution_id: str
     message: str
     guidance: str | None
+    scope_decision: str
     memory: str
     plan: dict[str, Any]
     code: list[dict[str, Any]]
@@ -81,7 +82,11 @@ class CodingGraph:
         workflow.add_node("coder", self.coder)
         workflow.add_node("reviewer", self.reviewer)
         workflow.add_edge(START, "planner")
-        workflow.add_edge("planner", "coder")
+        workflow.add_conditional_edges(
+            "planner",
+            self.route_after_planning,
+            {"coder": "coder", "end": END},
+        )
         workflow.add_edge("coder", "reviewer")
         workflow.add_conditional_edges(
             "reviewer",
@@ -130,6 +135,23 @@ class CodingGraph:
                     tag="planner_error",
                     telemetry=step_usage,
                 ) from exc
+            token_usage = merge_usage(state.get("token_usage"), step_usage)
+            if parsed.decision != "build":
+                await repo.append_event(
+                    run_id,
+                    EventKind.STEP_COMPLETED,
+                    {
+                        "step_key": "planner",
+                        "decision": parsed.decision,
+                        "model_usage": step_usage,
+                    },
+                    execution_id,
+                )
+                await repo.commit()
+                return {
+                    "scope_decision": parsed.decision,
+                    "token_usage": token_usage,
+                }
             suggested_title = parsed.suggested_project_title
             if suggested_title:
                 suggested_title = " ".join(suggested_title.split())
@@ -166,7 +188,6 @@ class CodingGraph:
                 execution_id,
             )
             await repo.commit()
-            token_usage = merge_usage(state.get("token_usage"), step_usage)
             logger.info(
                 "agent_step_completed",
                 extra={
@@ -179,6 +200,7 @@ class CodingGraph:
                 },
             )
             return {
+                "scope_decision": parsed.decision,
                 "plan": {
                     "id": str(plan.id),
                     "project_id": str(plan.project_id),
@@ -197,6 +219,10 @@ class CodingGraph:
                 "memory": memory,
                 "token_usage": token_usage,
             }
+
+    @staticmethod
+    def route_after_planning(state: GraphState) -> str:
+        return "coder" if state.get("scope_decision") == "build" else "end"
 
     async def coder(self, state: GraphState) -> GraphState:
         step_started = time.perf_counter()
