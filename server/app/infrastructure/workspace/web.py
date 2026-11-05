@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.application.ports import Workspace
 from app.domain.enums import ALLOWED_FILE_TYPES
@@ -88,19 +88,40 @@ class WebWorkspace(Workspace):
     async def publish(
         self, project_id: UUID, files: dict[str, str], artifact_ids: dict[str, UUID]
     ) -> None:
-        preview = self._preview_dir(project_id)
-        if preview.exists():
-            shutil.rmtree(preview)
-        for path, content in files.items():
-            validate_relative_path(path)
-            preview_target = preview / path
-            preview_target.parent.mkdir(parents=True, exist_ok=True)
-            preview_target.write_text(content, encoding="utf-8")
-            artifact_id = artifact_ids.get(path)
-            if artifact_id is not None:
-                artifact_target = self._artifact_dir(artifact_id) / path
-                artifact_target.parent.mkdir(parents=True, exist_ok=True)
-                artifact_target.write_text(content, encoding="utf-8")
+        root = self._preview_dir(project_id)
+        versions = root / "versions"
+        versions.mkdir(parents=True, exist_ok=True)
+        version = uuid4()
+        snapshot = versions / str(version)
+        snapshot.mkdir()
+        pointer_temp: str | None = None
+        published = False
+        try:
+            for path, content in files.items():
+                try:
+                    validate_relative_path(path)
+                except ValueError as exc:
+                    raise WorkspaceError(str(exc)) from exc
+                target = snapshot / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                artifact_id = artifact_ids.get(path)
+                if artifact_id is not None:
+                    await self.write_artifact(artifact_id, path, content)
+
+            for entry in root.iterdir():
+                if entry.is_file() and entry.name != "current":
+                    entry.unlink()
+            fd, pointer_temp = tempfile.mkstemp(dir=root, prefix=".current-")
+            with os.fdopen(fd, "w", encoding="utf-8") as pointer:
+                pointer.write(str(version))
+            os.replace(pointer_temp, root / "current")
+            published = True
+        finally:
+            if pointer_temp is not None and os.path.exists(pointer_temp):
+                os.unlink(pointer_temp)
+            if not published:
+                shutil.rmtree(snapshot)
 
     async def write_artifact(self, artifact_id: UUID, path: str, content: str) -> None:
         validate_relative_path(path)
@@ -109,12 +130,20 @@ class WebWorkspace(Workspace):
         target.write_text(content, encoding="utf-8")
 
     async def read_preview(self, project_id: UUID, path: str) -> bytes:
-        base = self._preview_dir(project_id)
+        root = self._preview_dir(project_id)
         relative = path or "index.html"
         try:
             validate_relative_path(relative)
         except ValueError as exc:
             raise WorkspaceError(str(exc)) from exc
+        pointer = root / "current"
+        try:
+            version = UUID(pointer.read_text(encoding="utf-8").strip())
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(relative) from exc
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise WorkspaceError("preview pointer is invalid") from exc
+        base = root / "versions" / str(version)
         target = (base / relative).resolve()
         if base not in target.parents and target != base:
             raise WorkspaceError("path escapes the preview directory")

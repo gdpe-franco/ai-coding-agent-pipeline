@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -125,6 +126,41 @@ async def test_publish_and_artifacts_round_trip(workspace: WebWorkspace) -> None
     await workspace.delete_artifact(artifact_id)
     await workspace.delete_project(project_id)
     assert await workspace.list_files(project_id) == []
+
+
+async def test_legacy_preview_is_removed_on_versioned_publish(workspace: WebWorkspace) -> None:
+    project_id = uuid4()
+    legacy_preview = workspace.root / "preview" / str(project_id)
+    legacy_preview.mkdir(parents=True)
+    legacy_file = legacy_preview / "index.html"
+    legacy_file.write_text("legacy approved", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        await workspace.read_preview(project_id, "index.html")
+
+    await workspace.publish(project_id, {"index.html": "new approved"}, {})
+
+    assert not legacy_file.exists()
+    assert await workspace.read_preview(project_id, "index.html") == b"new approved"
+
+
+async def test_failed_publish_keeps_the_previous_approved_preview(
+    workspace: WebWorkspace, monkeypatch
+) -> None:
+    project_id = uuid4()
+    await workspace.publish(project_id, {"index.html": "approved"}, {})
+    original_write_text = Path.write_text
+
+    def fail_staging_write(path: Path, data: str, *args, **kwargs):
+        if "versions" in path.parts and path.name == "index.html":
+            raise OSError("disk full")
+        return original_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_staging_write)
+    with pytest.raises(OSError, match="disk full"):
+        await workspace.publish(project_id, {"index.html": "partial replacement"}, {})
+
+    assert await workspace.read_preview(project_id, "index.html") == b"approved"
 
 
 async def test_archive_run_preserves_relative_files_and_project_cleanup(

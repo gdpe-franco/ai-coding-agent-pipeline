@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
+from starlette.requests import Request
 
 from app.application.ports import RateLimitResult
 from app.domain.enums import RunStatus
@@ -16,6 +19,7 @@ from app.infrastructure.rate_limit.postgres import (
     PostgresRateLimiter,
     RateLimitUnavailable,
 )
+from app.interfaces.middleware.rate_limit import RateLimitMiddleware
 from app.main import create_app
 from app.settings import Settings
 from tests.conftest import create_test_chat, create_test_user
@@ -123,6 +127,41 @@ def test_hmac_keys_are_scoped() -> None:
     limiter = PostgresRateLimiter(Factory(), "secret")
     assert limiter._hash("auth", "ip") != limiter._hash("read", "ip")
     assert len(limiter._hash("auth", "ip")) == 32
+
+
+def test_rate_limit_identity_uses_validated_subject_or_client_ip(settings) -> None:
+    middleware = RateLimitMiddleware(None, SimpleNamespace(settings=settings))
+
+    def request(authorization: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/api/v1/projects",
+                "raw_path": b"/api/v1/projects",
+                "query_string": b"",
+                "headers": [(b"authorization", authorization.encode())],
+                "server": ("localhost", 8000),
+                "client": ("192.0.2.4", 50000),
+            }
+        )
+
+    assert middleware._key(request("Bearer forged-one"), "read") == "192.0.2.4"
+    assert middleware._key(request("Bearer forged-two"), "read") == "192.0.2.4"
+
+    user_id = uuid4()
+    token = jwt.encode(
+        {
+            "sub": str(user_id),
+            "aud": "fastapi-users:auth",
+            "exp": datetime.now(UTC) + timedelta(minutes=5),
+        },
+        settings.secret_key,
+        algorithm="HS256",
+    )
+    assert middleware._key(request(f"Bearer {token}"), "read") == f"user:{user_id}"
 
 
 def test_forwarded_ip_is_used_only_from_a_trusted_proxy(tmp_path) -> None:

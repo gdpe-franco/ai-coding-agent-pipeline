@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 
+import jwt
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.infrastructure.rate_limit.postgres import RateLimitUnavailable
+from app.interfaces.dependencies import decode_user_id
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -107,7 +108,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return self._client_ip(request)
         authorization = request.headers.get("authorization", "")
         if authorization:
-            return "token:" + hashlib.sha256(authorization.encode()).hexdigest()
+            scheme, separator, token = authorization.partition(" ")
+            if separator and scheme.casefold() == "bearer":
+                try:
+                    user_id = decode_user_id(token, self.container.settings.secret_key)
+                except jwt.PyJWTError, ValueError, TypeError:
+                    pass
+                else:
+                    return f"user:{user_id}"
         return self._client_ip(request)
 
     def _client_ip(self, request: Request) -> str:

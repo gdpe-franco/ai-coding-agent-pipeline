@@ -515,7 +515,7 @@ that and providing shared file storage. Revisit the queue design if contention, 
 |---|---|
 | `projects/{project_id}/` | Latest mutable generated files, including unapproved changes. |
 | `artifacts/{artifact_id}/{file_path}` | Generated-file snapshot for a run execution; handoffs also retain artifacts. |
-| `preview/{project_id}/` | Copied latest approved project, addressed publicly by `preview_id`. |
+| `preview/{project_id}/` | Approved snapshots under `versions/`; `current` selects the snapshot served by `preview_id`. |
 | `archived/{project_id}/{run_id}/{execution_id}/...` | Completed-run archive organized by execution. |
 
 Resolved paths must remain within the project and belong to the current plan. Writes use a same-directory
@@ -523,10 +523,11 @@ temporary file and `os.replace`, giving per-file atomicity and preserving unplan
 PNG/ICO and undecodable content are excluded. Coder currently produces text, including SVG assets.
 
 Finalization saves generated-file snapshots per execution and publishes the readable-text workspace on approval.
-Handoffs retain their generated artifacts and the previous preview. Snapshots cover generated files at finalization;
-intermediate generations and complete historical projects are not versioned. Each artifact records a SHA-256.
-Publication removes and recopies the preview directory before DB finalization, so a crash during copying can leave
-a partial preview.
+Publication writes a complete preview version and its artifacts, then atomically replaces the `current` pointer;
+failed writes leave the previous approved preview selected. Prior versions remain on disk for in-flight readers and
+are removed with the project. Handoffs retain their generated artifacts and preview.
+Run artifacts cover generated files at finalization; intermediate generations and full project history are not
+versioned. Each artifact records a SHA-256.
 
 Terminal-run deletion removes events/artifacts while preserving the chat and current files. Project/chat deletion
 also removes their workspace, preview and memory; active runs block deletion with `409`. Hourly maintenance archives
@@ -681,7 +682,6 @@ deployment/prompt configuration. The original assessment PDF and its coupon rule
 |---|---|
 | Static/syntax checks and LLM judgment only | Functionally broken apps can be approved; inline script errors can be missed. |
 | Replay/fencing gaps | Stale or recovered workers can repeat calls, events and filesystem effects. |
-| Non-atomic preview publication | Crash during copy can damage the previous preview despite normal rejection preservation. |
 | Complete-file/context strategy | Large histories/workspaces increase token usage and latency; no retrieval/context budget. |
 | Partial failure telemetry | Failure summary is not necessarily an execution-wide total; unknown provider consumption remains possible. |
 | Local volumes and tunnel hosting | No HA/backup automation; preview URLs may change, logs are container-scoped. |

@@ -390,9 +390,12 @@ def test_preview_url_and_preview_route(client: TestClient, settings: Settings) -
     with psycopg.connect(Settings().psycopg_url) as connection:
         connection.execute("UPDATE projects SET preview_ready=true WHERE id=%s", (project["id"],))
         connection.commit()
-    preview_file = settings.data_dir / "preview" / project["id"] / "index.html"
+    version = uuid4()
+    preview_root = settings.data_dir / "preview" / project["id"]
+    preview_file = preview_root / "versions" / str(version) / "index.html"
     preview_file.parent.mkdir(parents=True)
     preview_file.write_text("<h1>Approved</h1>", encoding="utf-8")
+    (preview_root / "current").write_text(str(version), encoding="utf-8")
     url = client.get(
         f"/api/v1/projects/{project['id']}/preview-url", headers=auth_headers(token)
     ).json()["url"]

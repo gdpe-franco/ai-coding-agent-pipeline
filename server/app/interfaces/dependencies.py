@@ -24,6 +24,16 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         self.verification_token_secret = secret_key
 
 
+def decode_user_id(token: str, secret_key: str) -> uuid.UUID:
+    payload = jwt.decode(
+        token,
+        secret_key,
+        algorithms=["HS256"],
+        audience="fastapi-users:auth",
+    )
+    return uuid.UUID(str(payload.get("sub")))
+
+
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     container = request.app.state.container
     async with container.session_factory() as session:
@@ -57,13 +67,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            request.app.state.container.settings.secret_key,
-            algorithms=["HS256"],
-            audience="fastapi-users:auth",
+        user_id = decode_user_id(
+            credentials.credentials, request.app.state.container.settings.secret_key
         )
-        user_id = uuid.UUID(str(payload.get("sub")))
     except (jwt.PyJWTError, ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
